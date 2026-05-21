@@ -8,8 +8,13 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.111",
+    "prism-sdk",
+    "psycopg[binary]>=3.2",
     "uvicorn[standard]>=0.29",
 ]
+
+[tool.uv.sources]
+prism-sdk = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["chatbot_api"]

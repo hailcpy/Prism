@@ -247,12 +247,16 @@ version = "0.1.0"
 source = { editable = "services/chatbot-api" }
 dependencies = [
     { name = "fastapi" },
+    { name = "prism-sdk" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.111" },
+    { name = "prism-sdk", editable = "sdk" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29" },
 ]
 
