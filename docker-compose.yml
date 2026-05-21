@@ -1,0 +1,153 @@
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: olive
+      POSTGRES_PASSWORD: olive
+      POSTGRES_DB: olive
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Phase 1 will add: - ./infra/sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U olive"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Python services ─────────────────────────────────────────────────────────
+
+  chatbot-api:
+    build:
+      context: services/chatbot-api
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://olive:olive@postgres:5432/olive
+      REDIS_URL: redis://redis:6379/0
+      INGESTION_URL: http://ingestion-api:8001
+    ports:
+      - "8100:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  ingestion-api:
+    build:
+      context: services/ingestion-api
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://olive:olive@postgres:5432/olive
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8101:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/healthz')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── Workers ─────────────────────────────────────────────────────────────────
+
+  log-writer:
+    build:
+      context: services/workers
+    command: ["python", "-m", "log_writer.main"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://olive:olive@postgres:5432/olive
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  metrics-roller:
+    build:
+      context: services/workers
+    command: ["python", "-m", "metrics_roller.main"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://olive:olive@postgres:5432/olive
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  metrics-reconciler:
+    build:
+      context: services/workers
+    command: ["python", "-m", "metrics_reconciler.main"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://olive:olive@postgres:5432/olive
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  partition-cron:
+    build:
+      context: services/workers
+    command: ["python", "-m", "partition_cron.main"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://olive:olive@postgres:5432/olive
+      PARTITION_RETENTION_DAYS: ${PARTITION_RETENTION_DAYS:-30}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Chatbot UI ──────────────────────────────────────────────────────────────
+
+  chatbot-ui:
+    build:
+      context: web
+    ports:
+      - "3001:3000"
+    environment:
+      NEXT_PUBLIC_CHATBOT_API_URL: http://localhost:8100
+    depends_on:
+      - chatbot-api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  postgres-data:
