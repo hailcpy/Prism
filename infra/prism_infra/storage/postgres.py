@@ -19,8 +19,27 @@ class PostgresLogStore:
         if not events:
             return
 
-        rows = [self._event_to_row(event) for event in events]
+        rows_by_id = {event.inference_id: self._event_to_row(event) for event in events}
         with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            for inference_id in sorted(rows_by_id):
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (inference_id,)
+                )
+            cur.execute(
+                """
+                SELECT id::text
+                FROM inference_logs
+                WHERE id = ANY(%(ids)s::uuid[])
+                """,
+                {"ids": list(rows_by_id)},
+            )
+            existing_ids = {row[0] for row in cur.fetchall()}
+            rows = [
+                row for inference_id, row in rows_by_id.items() if inference_id not in existing_ids
+            ]
+            if not rows:
+                return
+
             cur.executemany(
                 """
                 INSERT INTO inference_logs (

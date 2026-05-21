@@ -23,4 +23,14 @@ class Bus(Protocol):
         block_ms: int = 5000,
     ) -> list[StreamMessage]: ...
 
+    def claim_pending(
+        self,
+        stream: str,
+        group: str,
+        consumer: str,
+        *,
+        min_idle_ms: int,
+        count: int = 100,
+    ) -> list[StreamMessage]: ...
+
     def ack(self, stream: str, group: str, message_ids: list[str]) -> None: ...

@@ -42,6 +42,33 @@ class RedisStreamsBus:
                 messages.append(StreamMessage(id=message_id, event=json.loads(fields["event"])))
         return messages
 
+    def claim_pending(
+        self,
+        stream: str,
+        group: str,
+        consumer: str,
+        *,
+        min_idle_ms: int,
+        count: int = 100,
+    ) -> list[StreamMessage]:
+        self._ensure_group(stream, group)
+        response = cast(
+            Any,
+            self.client.xautoclaim(
+                name=stream,
+                groupname=group,
+                consumername=consumer,
+                min_idle_time=min_idle_ms,
+                start_id="0-0",
+                count=count,
+            ),
+        )
+        entries = cast(list[tuple[str, dict[str, str]]], response[1])
+        return [
+            StreamMessage(id=message_id, event=json.loads(fields["event"]))
+            for message_id, fields in entries
+        ]
+
     def ack(self, stream: str, group: str, message_ids: list[str]) -> None:
         if message_ids:
             self.client.xack(stream, group, *message_ids)

@@ -13,10 +13,12 @@ class InMemoryLogStore:
         self.metrics: dict[tuple[str, str, str], MetricsRow] = {}
 
     def write_logs_batch(self, events: list[InferenceEvent]) -> None:
-        seen = {(event.inference_id, event.created_at) for event in self.logs}
-        self.logs.extend(
-            event for event in events if (event.inference_id, event.created_at) not in seen
-        )
+        seen = {event.inference_id for event in self.logs}
+        for event in events:
+            if event.inference_id in seen:
+                continue
+            self.logs.append(event)
+            seen.add(event.inference_id)
 
     def upsert_metrics(self, rows: list[MetricsRow]) -> None:
         for row in rows:
