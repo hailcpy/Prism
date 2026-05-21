@@ -1,10 +1,12 @@
 # Runbook
 
-How to run, operate, and verify Olive locally. Read alongside [`architecture.md`](architecture.md).
+How to run, operate, and verify Prism locally. Read alongside [`architecture.md`](architecture.md).
 
 ## Prerequisites
 
 - Docker + Docker Compose
+- Python tooling: `uv`
+- Node.js + npm
 - Provider API keys (at least one): `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`
 
 ## Quick start
@@ -26,17 +28,18 @@ make up
 | `OPENAI_API_KEY` | one of | — | Used by LiteLLM for `gpt-*` models |
 | `ANTHROPIC_API_KEY` | one of | — | Used by LiteLLM for `claude-*` models |
 | `GEMINI_API_KEY` | one of | — | Used by LiteLLM for `gemini-*` models |
-| `DATABASE_URL` | yes | `postgres://olive:olive@postgres:5432/olive` | Wired by Compose |
+| `DATABASE_URL` | yes | `postgres://prism:prism@postgres:5432/prism` | Wired by Compose |
 | `REDIS_URL` | yes | `redis://redis:6379/0` | Wired by Compose |
 | `INGESTION_URL` | yes | `http://ingestion:8001` | What the SDK posts to |
-| `OLIVE_KEEP_RAW` | no | `false` | If `true`, ingestion redacts and persists the full `raw_payload` (debug only — logs a warning at startup). When `false`, `raw_payload` is dropped at ingestion; only redacted previews persist. See ADR-0006. |
-| `OLIVE_LOG_LEVEL` | no | `INFO` | Standard Python log level |
+| `PRISM_KEEP_RAW` | no | `false` | If `true`, ingestion redacts and persists the full `raw_payload` (debug only — logs a warning at startup). When `false`, `raw_payload` is dropped at ingestion; only redacted previews persist. See ADR-0006. |
+| `PRISM_LOG_LEVEL` | no | `INFO` | Standard Python log level |
 | `PARTITION_RETENTION_DAYS` | no | `30` | partition-cron drops older partitions |
 
 ## Make targets
 
 | Target | What it does |
 |---|---|
+| `make install-dev` | Install Python workspace packages and dev tools using `uv sync --all-packages --dev` |
 | `make up` | Build + start all services |
 | `make down` | Stop + remove containers |
 | `make logs` | Tail logs from all services |
@@ -44,8 +47,23 @@ make up
 | `make psql` | Open a psql shell into the Postgres container |
 | `make redis-cli` | Open redis-cli |
 | `make seed` | Insert a few sample conversations + logs for dashboard demo |
-| `make test` | Run all unit + integration tests |
+| `make lint` | Run Ruff for Python and Next ESLint for the web app |
+| `make format` | Format Python with Ruff and web files with Prettier |
+| `make format-check` | Verify Python and web formatting without rewriting files |
+| `make typecheck` | Run Python `ty` and TypeScript `tsc --noEmit` |
+| `make test` | Run pytest |
+| `make check` | Run the full local quality gate: lint, format-check, typecheck, test |
 | `make demo` | `make up` + open UI and dashboard in browser |
+
+## Quality checks
+
+Run this before declaring code changes done:
+
+```bash
+make check
+```
+
+The Python workspace is managed by `uv`; the root `uv.lock` is the canonical Python lockfile. The web app uses `package-lock.json`. Use `make format` to apply Ruff and Prettier formatting before running the full check.
 
 ## Services and ports
 

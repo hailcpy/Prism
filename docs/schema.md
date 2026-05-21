@@ -69,7 +69,7 @@ CREATE TABLE inference_logs (
   prompt_preview       TEXT,                      -- redacted, <= 500 chars
   response_preview     TEXT,                      -- redacted, <= 500 chars
   raw_payload_uri      TEXT,                      -- 's3://...' when S3 lands; NULL today
-  raw_payload_jsonb    JSONB,                     -- present only when OLIVE_KEEP_RAW=true; redacted; NULL otherwise
+  raw_payload_jsonb    JSONB,                     -- present only when PRISM_KEEP_RAW=true; redacted; NULL otherwise
   metadata_jsonb       JSONB NOT NULL DEFAULT '{}'::jsonb,
   sdk_version          TEXT,
   schema_version       TEXT NOT NULL,
@@ -124,7 +124,7 @@ This is the part reviewers should look at carefully.
 ### Writes
 The split between `LogStore` and `RawPayloadStore` is by *responsibility*, not by table:
 
-- `RawPayloadStore.put(inference_id, redacted_payload) -> (uri | None, embedded_jsonb | None)` is called **first**, by the ingestion API (before publish) when `OLIVE_KEEP_RAW=true`. It returns *either* a URI to attach to the log row *or* an inline jsonb blob to attach to the log row — never both, never neither.
+- `RawPayloadStore.put(inference_id, redacted_payload) -> (uri | None, embedded_jsonb | None)` is called **first**, by the ingestion API (before publish) when `PRISM_KEEP_RAW=true`. It returns *either* a URI to attach to the log row *or* an inline jsonb blob to attach to the log row — never both, never neither.
   - Today (`JsonbRawPayloadStore`): returns `(None, redacted_jsonb)`.
   - Future (`S3RawPayloadStore`): writes the payload to S3 and returns `(s3://..., None)`.
   - Default (raw not kept): the store is not called at all; both columns are `NULL`.

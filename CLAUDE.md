@@ -1,4 +1,4 @@
-# Olive — repo guidance for Claude Code
+# Prism — repo guidance for Claude Code
 
 ## Spec lives in `docs/`. Read it before changing code.
 
@@ -18,10 +18,19 @@ The docs are authoritative. If code and docs disagree, the docs win until proven
 
 - **ADRs are immutable once accepted.** If a decision changes, write a new ADR that supersedes the old one. Don't edit history.
 - **Docs are the contract, not the code.** If you find a contradiction between the docs and what you're about to implement, **stop and ask** — fix the doc first, then implement. Don't silently fix it in code; that creates drift no reviewer can audit.
+- **Run the quality gate before declaring code done.** Use `make check` for linting, formatting checks, type checking, and tests. Use `make format` before `make check` when edits are ready.
 - **Run the Phase N smoke check from `docs/implementation-plan.md` before declaring a phase done.** Each phase ends with a demoable artifact — produce it.
 - **The migration seam is non-negotiable.** All log-table I/O goes through `LogStore` / `RawPayloadStore` / `Bus` interfaces (ADR-0005). No `psycopg`/`redis-py`/`boto3` imports outside the `infra/storage/` and `infra/bus/` modules.
 - **No cross-group SQL joins.** App data ↔ inference logs ↔ rollups are linked by soft FKs only (ADR-0008). Correlate in app code if you need to.
 - **Don't over-engineer ahead of the plan.** Each phase has a defined scope; resist adding "while I'm here" features. If something seems missing, it's probably deferred to a later phase or out of scope by design (k8s, frontend cancel/list/resume).
+
+## Quality tooling
+
+- Python dependency management uses `uv` with the root `uv.lock` as the canonical lockfile. Install dev tools with `make install-dev`.
+- Python linting/formatting uses Ruff. Type checking uses `ty`. Tests use pytest.
+- Web linting uses Next ESLint, type checking uses `tsc --noEmit`, and formatting uses Prettier.
+- `make check` runs the full local gate: Python Ruff lint, web ESLint, Python and web format checks, Python `ty`, TypeScript, and pytest.
+- Keep `.env` local-only. Commit `.env.example` changes instead.
 
 ## Phase-by-phase cadence
 

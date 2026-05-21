@@ -1,15 +1,15 @@
 FROM python:3.12-slim
 
+COPY --from=ghcr.io/astral-sh/uv:0.9.13 /uv /uvx /bin/
+
 WORKDIR /app
 
-COPY pyproject.toml .
-# No external deps in Phase 0 — add redis-py, psycopg etc. in Phase 2.
-RUN pip install --no-cache-dir hatchling
+ENV PATH="/app/.venv/bin:$PATH" \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
 
-COPY log_writer/     log_writer/
-COPY metrics_roller/ metrics_roller/
-COPY metrics_reconciler/ metrics_reconciler/
-COPY partition_cron/ partition_cron/
+COPY . .
+RUN uv sync --locked --no-dev --package prism-workers
 
 # Default CMD is overridden per service in docker-compose.yml.
 CMD ["python", "-m", "log_writer.main"]

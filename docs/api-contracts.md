@@ -7,9 +7,9 @@ All HTTP and event-bus contracts. Versioned via URL prefix (`/v1`) for HTTP and 
 ## SDK public API
 
 ```python
-from olive_sdk import OliveClient
+from prism_sdk import PrismClient
 
-client = OliveClient(
+client = PrismClient(
     ingestion_url="http://ingestion:8001",
     api_key=None,                 # reserved for future auth
     sink="http",                  # "http" | "noop" | "stdout"
@@ -39,7 +39,7 @@ async for chunk in client.chat.completions.stream(
 # SDK emits ONE InferenceEvent at stream completion (success, error, or cancelled).
 ```
 
-**Lifecycle:** `OliveClient.close()` flushes the in-memory queue synchronously. Also registered via `atexit`.
+**Lifecycle:** `PrismClient.close()` flushes the in-memory queue synchronously. Also registered via `atexit`.
 
 ---
 
@@ -84,7 +84,7 @@ async for chunk in client.chat.completions.stream(
 
 **Raw payload policy.** The SDK MAY include `raw_payload` (full request + response JSON). The ingestion API treats it as follows:
 
-| `OLIVE_KEEP_RAW` | What happens to `raw_payload` |
+| `PRISM_KEEP_RAW` | What happens to `raw_payload` |
 |---|---|
 | `false` (default) | **Dropped at ingestion before publish.** Never lands on the bus, never stored. Only the redacted previews persist. |
 | `true` (debug only) | Every string field inside the payload is passed through the same PII redactor. Then the redacted payload is attached to the event and stored. A loud warning is logged at ingestion startup. |

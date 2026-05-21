@@ -27,7 +27,7 @@ Redaction runs **in the ingestion API**, before any `XADD` to Redis Streams. Not
 
 Raw payload handling:
 
-| `OLIVE_KEEP_RAW` env var | Behavior |
+| `PRISM_KEEP_RAW` env var | Behavior |
 |---|---|
 | **`false` (default)** | `raw_payload` is dropped at ingestion **before publish**. Never lands on the bus, never stored. Only redacted `prompt_preview` and `response_preview` persist. |
 | `true` (debug only) | Every string field inside `raw_payload` is passed through the same regex redactor. The redacted payload is then attached to the event and persisted to `raw_payload_jsonb` (today) or written to S3 (future). Ingestion startup logs a loud warning. |
@@ -42,4 +42,4 @@ The redactor is a regex module today (email, phone, SSN, credit-card). It is inv
 - **+** Centralized rule means we can also centralize a "PII detected" counter for audit.
 - **−** Raw PII transits one network hop (SDK → ingestion) inside the private network. Production deploy would mandate TLS / mTLS; not in scope for the takehome.
 - **−** Regex misses non-standard formats (international phone numbers, custom IDs). Documented limitation; the `Redactor` interface allows upgrading to Presidio without code changes elsewhere.
-- **−** When `OLIVE_KEEP_RAW=true` is enabled, the safety story degrades from "no raw PII downstream" to "no *un-redacted* raw PII downstream." If the redactor misses a pattern, that miss is now stored. The flag is debug-only for this reason.
+- **−** When `PRISM_KEEP_RAW=true` is enabled, the safety story degrades from "no raw PII downstream" to "no *un-redacted* raw PII downstream." If the redactor misses a pattern, that miss is now stored. The flag is debug-only for this reason.

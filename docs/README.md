@@ -1,6 +1,6 @@
-# Olive Docs
+# Prism Docs
 
-Architecture, contracts, and decision log for the Olive LLM inference logging system.
+Architecture, contracts, and decision log for the Prism LLM inference logging system.
 
 ## How to read these docs
 

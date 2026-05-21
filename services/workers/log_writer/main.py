@@ -3,14 +3,15 @@
 Consumes inference.logged Redis stream (cg-writer) and bulk-inserts into
 inference_logs. Full implementation in Phase 2.
 """
+
 import logging
-import time
 import pathlib
+import time
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 log = logging.getLogger("log-writer")
 
-HEALTH_FILE = pathlib.Path("/tmp/olive-log-writer-healthy")
+HEALTH_FILE = pathlib.Path("/tmp/prism-log-writer-healthy")
 
 
 def main() -> None:

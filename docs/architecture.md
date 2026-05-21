@@ -2,7 +2,7 @@
 
 ## Context
 
-Olive is a takehome for ollive.ai. The brief: build a lightweight inference logging + ingestion system for an LLM application — a chatbot, an SDK that wraps LLM calls, an ingestion pipeline, and a database. The rubric explicitly calls out *schema design and practical tradeoffs*, so the architecture is designed to demonstrate judgment, not just code volume.
+Prism is a takehome for ollive.ai. The brief: build a lightweight inference logging + ingestion system for an LLM application — a chatbot, an SDK that wraps LLM calls, an ingestion pipeline, and a database. The rubric explicitly calls out *schema design and practical tradeoffs*, so the architecture is designed to demonstrate judgment, not just code volume.
 
 ### In-scope bonuses
 Multi-provider, streaming responses, dashboards, Docker Compose one-command setup, PII redaction, event-based architecture.
@@ -22,7 +22,7 @@ k8s self-hosted deploy, cancel/list/resume frontend.
 A working slice with these capabilities:
 
 1. **Chatbot UI** — multi-turn chat, short context window, model selector (OpenAI / Anthropic / Gemini via LiteLLM), streaming token-by-token responses.
-2. **Python SDK** (`olive-sdk`) — wraps LiteLLM, captures metadata, emits log events fire-and-forget to ingestion.
+2. **Python SDK** (`prism-sdk`) — wraps LiteLLM, captures metadata, emits log events fire-and-forget to ingestion.
 3. **Ingestion API** — FastAPI; validates SDK payloads, redacts PII, publishes to Redis Streams.
 4. **Workers** consuming Redis Streams:
    - `log-writer` — batched inserts into `inference_logs`.
@@ -58,7 +58,7 @@ Five processes plus the UI:
 ┌──────────────┐      ┌──────────────┐
 │  Chatbot UI  │──────│ Chatbot API  │──────► LiteLLM ──► Provider
 │ (Next.js)    │ SSE  │ (FastAPI)    │   ▲
-└──────────────┘      └──────┬───────┘   │ (olive-sdk wraps this call)
+└──────────────┘      └──────┬───────┘   │ (prism-sdk wraps this call)
                              │
                              │ (sdk fire-and-forget HTTP)
                              ▼
@@ -88,7 +88,7 @@ Five processes plus the UI:
 
 See [`api-contracts.md`](api-contracts.md#sdk-public-api) for the full surface. Headline points:
 
-- Importing `olive_sdk` is the **only** way the chatbot talks to LiteLLM. There is no `import litellm` anywhere outside the SDK.
+- Importing `prism_sdk` is the **only** way the chatbot talks to LiteLLM. There is no `import litellm` anywhere outside the SDK.
 - Fire-and-forget: the user-facing call never waits for ingestion. Bounded in-memory queue + background flusher. (ADR-0009)
 - Streaming emits **one** log event at stream completion, with TTFT + total latency + final status. No per-token events. (ADR-0007)
 - We wrap LiteLLM, we do not use LiteLLM's `success_callback`. Visibility of instrumentation is the point. (ADR-0004)
@@ -101,7 +101,7 @@ See [`api-contracts.md`](api-contracts.md#sdk-public-api) for the full surface. 
 
 - Accepts an array of `InferenceEvent`. Soft limit 100/req, hard 500.
 - Pydantic validation at the boundary. Mixed valid/invalid batches return a single `202` with an `accepted` count and a `rejected: [{index, reason}]` array. There is no `422` path for batches; only fully malformed requests (not JSON, missing `events`) return `4xx`.
-- **PII redaction here, on every text-bearing field.** Email, phone, SSN, credit-card regexes scrub `prompt_preview`, `response_preview`, **and (when present) every string field inside `raw_payload`**. `raw_payload` is then **dropped entirely** before publish unless `OLIVE_KEEP_RAW=true` is explicitly set (debug only; logs a loud warning at startup). Nothing past the bus ever sees an unredacted prompt, response, or raw payload — by construction. (ADR-0006)
+- **PII redaction here, on every text-bearing field.** Email, phone, SSN, credit-card regexes scrub `prompt_preview`, `response_preview`, **and (when present) every string field inside `raw_payload`**. `raw_payload` is then **dropped entirely** before publish unless `PRISM_KEEP_RAW=true` is explicitly set (debug only; logs a loud warning at startup). Nothing past the bus ever sees an unredacted prompt, response, or raw payload — by construction. (ADR-0006)
 - `XADD` each redacted event to Redis stream `inference.logged`.
 - Returns `202` with stream IDs and per-event reject reasons.
 
@@ -198,7 +198,7 @@ See [`runbook.md`](runbook.md) for the operator-facing version. `docker compose 
 
 - `postgres` (init SQL: schemas, partition function, next-7-day partitions)
 - `redis` (Streams + general cache)
-- `chatbot-api` (FastAPI + olive-sdk)
+- `chatbot-api` (FastAPI + prism-sdk)
 - `ingestion-api` (FastAPI)
 - `log-writer` worker
 - `metrics-roller` worker

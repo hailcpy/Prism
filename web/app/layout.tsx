@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Olive — LLM Chatbot",
+  title: "Prism — LLM Chatbot",
   description: "Multi-provider LLM chatbot with inference logging",
 };
 

@@ -4,6 +4,7 @@ Runs every 5 minutes. Recomputes the last N closed minute-buckets directly
 from inference_logs and UPSERT-replaces into metrics_minute. Full
 implementation in Phase 6.
 """
+
 import logging
 import time
 

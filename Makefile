@@ -1,4 +1,4 @@
-.PHONY: up down logs psql redis-cli seed test demo
+.PHONY: up down logs psql redis-cli seed install-dev lint format format-check typecheck test check demo
 
 up:
 	docker compose up -d --build
@@ -10,7 +10,7 @@ logs:
 	docker compose logs -f $(if $(SERVICE),$(SERVICE),)
 
 psql:
-	docker compose exec postgres psql -U olive olive
+	docker compose exec postgres psql -U prism prism
 
 redis-cli:
 	docker compose exec redis redis-cli
@@ -18,8 +18,30 @@ redis-cli:
 seed:
 	@echo "seed: not implemented until Phase 4"
 
+install-dev:
+	uv sync --all-packages --dev
+
+lint:
+	uv run ruff check .
+	cd web && npm run lint
+
+format:
+	uv run ruff check --select I --fix .
+	uv run ruff format .
+	cd web && npm run format
+
+format-check:
+	uv run ruff format --check .
+	cd web && npm run format:check
+
+typecheck:
+	uv run ty check
+	cd web && npm run typecheck
+
 test:
-	@echo "test: not implemented until Phase 2"
+	uv run pytest
+
+check: lint format-check typecheck test
 
 demo:
 	$(MAKE) up

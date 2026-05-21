@@ -1,4 +1,4 @@
-# Olive — LLM Inference Logging & Ingestion System
+# Prism — LLM Inference Logging & Ingestion System
 
 ## Context
 
@@ -50,7 +50,7 @@ ADR format follows the standard Michael Nygard template: **Status, Context, Deci
 A working slice with these capabilities:
 
 1. **Chatbot UI** — multi-turn chat with short context window, model selector (OpenAI / Anthropic / Gemini via LiteLLM), streaming responses rendered token-by-token.
-2. **Python SDK** (`olive-sdk`) — wraps LiteLLM, captures metadata, emits log events fire-and-forget to ingestion.
+2. **Python SDK** (`prism-sdk`) — wraps LiteLLM, captures metadata, emits log events fire-and-forget to ingestion.
 3. **Ingestion API** — FastAPI service; validates SDK payloads, redacts PII, publishes to Redis Streams.
 4. **Workers** (consume Redis Streams):
    - `log-writer` — batched inserts into `inference_logs`.
@@ -86,7 +86,7 @@ Five processes, all Python except the chatbot UI:
 ┌──────────────┐      ┌──────────────┐
 │  Chatbot UI  │──────│ Chatbot API  │──────► LiteLLM ──► Provider
 │ (Next.js)    │ SSE  │ (FastAPI)    │   ▲
-└──────────────┘      └──────┬───────┘   │ (olive-sdk wraps this call)
+└──────────────┘      └──────┬───────┘   │ (prism-sdk wraps this call)
                              │
                              │ (sdk fire-and-forget)
                              ▼
@@ -114,14 +114,14 @@ Five processes, all Python except the chatbot UI:
 
 ## 4. SDK public API design
 
-`olive-sdk` is a thin Python package. The whole point is that the chatbot imports *this*, never `litellm` or provider SDKs directly.
+`prism-sdk` is a thin Python package. The whole point is that the chatbot imports *this*, never `litellm` or provider SDKs directly.
 
 ### Surface
 
 ```python
-from olive_sdk import OliveClient
+from prism_sdk import PrismClient
 
-client = OliveClient(
+client = PrismClient(
     ingestion_url="http://ingestion:8001",
     api_key=None,                 # not used in takehome, reserved for future
     sink="http",                  # "http" | "noop" | "stdout" (testing)
@@ -168,7 +168,7 @@ LiteLLM has `success_callback` / `failure_callback` hooks. Using them would hide
 
 - Accepts an array of `InferenceEvent`. Soft limit 100/req, hard 500.
 - Schema validation via Pydantic — reject malformed events at the boundary, return per-event error array (partial success allowed).
-- **PII redaction here** (not in SDK, not in workers): regexes for email/phone/SSN/credit-card on `prompt_preview`, `response_preview`. Original is dropped *unless* `OLIVE_KEEP_RAW=true` (off by default; for debugging only).
+- **PII redaction here** (not in SDK, not in workers): regexes for email/phone/SSN/credit-card on `prompt_preview`, `response_preview`. Original is dropped *unless* `PRISM_KEEP_RAW=true` (off by default; for debugging only).
 - Publish each redacted event to Redis Stream `inference.logged` with `XADD`.
 - Return 202 with stream IDs (so SDK can log them if needed for debugging; not used for retry semantics).
 
@@ -306,14 +306,14 @@ Same shape as the SDK event after PII redaction. Versioned via `schema_version` 
 
 - `postgres` (with init SQL: schemas, partition function, daily partitions for next 7d)
 - `redis` (Streams + general cache)
-- `chatbot-api` (FastAPI + olive-sdk)
+- `chatbot-api` (FastAPI + prism-sdk)
 - `ingestion-api` (FastAPI)
 - `log-writer` (Python worker)
 - `metrics-roller` (Python worker)
 - `chatbot-ui` (Next.js dev server)
 - `partition-cron` (lightweight container that creates tomorrow's partition nightly)
 
-`.env.example` documents every var: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DATABASE_URL`, `REDIS_URL`, `INGESTION_URL`, `OLIVE_KEEP_RAW`, etc.
+`.env.example` documents every var: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DATABASE_URL`, `REDIS_URL`, `INGESTION_URL`, `PRISM_KEEP_RAW`, etc.
 
 Make targets: `make up`, `make down`, `make logs`, `make seed`, `make test`, `make demo` (opens UI + dashboard tabs).
 
@@ -376,7 +376,7 @@ Each phase ends with something demonstrable. Don't skip the demo step — it for
 - **Demoable:** end-to-end log flow without a chatbot.
 
 ### Phase 3 — SDK (1 day)
-- [ ] `OliveClient` with `chat.completions.create` (non-streaming first).
+- [ ] `PrismClient` with `chat.completions.create` (non-streaming first).
 - [ ] LiteLLM call, metadata capture, fire-and-forget queue + flusher.
 - [ ] Unit tests with `sink="noop"` and mocked LiteLLM.
 - [ ] Integration test against running ingestion.
@@ -385,7 +385,7 @@ Each phase ends with something demonstrable. Don't skip the demo step — it for
 ### Phase 4 — Chatbot (API + UI) non-streaming (1 day)
 - [ ] FastAPI service with conversations + messages endpoints.
 - [ ] Next.js UI: model selector, send message, render history.
-- [ ] Wires through olive-sdk on every LLM call.
+- [ ] Wires through prism-sdk on every LLM call.
 - **Demoable:** real chat session, with logs landing in DB.
 
 ### Phase 5 — Streaming (½ day)

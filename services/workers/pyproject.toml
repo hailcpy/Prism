@@ -3,7 +3,17 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "olive-workers"
+name = "prism-workers"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "prism-infra",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "log_writer",
+    "metrics_roller",
+    "metrics_reconciler",
+    "partition_cron",
+]
