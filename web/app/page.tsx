@@ -72,12 +72,35 @@ const models = [
   { label: "Claude Sonnet", value: "claude-3-5-sonnet-latest" },
   { label: "Gemini 1.5 Flash", value: "gemini/gemini-1.5-flash" },
   {
-    label: "Claude 3.5 Sonnet (Bedrock)",
-    value: "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
+    label: "Custom Sonnet (Bedrock profile)",
+    value:
+      "bedrock/arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/hnxtndg2c380",
   },
   {
-    label: "Claude 3 Haiku (Bedrock)",
-    value: "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+    label: "Custom Opus (Bedrock profile)",
+    value:
+      "bedrock/arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/l4phmjq3xd8t",
+  },
+  {
+    label: "Custom Haiku (Bedrock profile)",
+    value:
+      "bedrock/arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/ge5qern21zg5",
+  },
+  {
+    label: "Claude Sonnet 4.5 (Bedrock)",
+    value: "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  },
+  {
+    label: "Claude Haiku 4.5 (Bedrock)",
+    value: "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+  },
+  {
+    label: "Llama 3.3 70B (Bedrock)",
+    value: "bedrock/us.meta.llama3-3-70b-instruct-v1:0",
+  },
+  {
+    label: "DeepSeek R1 (Bedrock)",
+    value: "bedrock/us.deepseek.r1-v1:0",
   },
 ];
 
