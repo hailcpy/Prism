@@ -7,15 +7,18 @@ How to run, operate, and verify Prism locally. Read alongside [`architecture.md`
 - Docker + Docker Compose
 - Python tooling: `uv`
 - Node.js + npm
-- Provider API keys (at least one): `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`
+- Phase 9 credential storage: a stable `PRISM_CREDS_KEY`
+- Provider API keys are added through the Settings UI once Phase 9 lands. Until then, the legacy env-var path still accepts `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`.
 
 ## Quick start
 
 ```bash
 cp .env.example .env
-# edit .env to fill in at least one provider key
+# generate and set PRISM_CREDS_KEY before using DB-backed credentials:
+# python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
 make up
 # open http://localhost:3000 (chatbot UI)
+# after Phase 9: open Settings and add/test/save at least one provider credential
 # open http://localhost:3000/metrics (dashboard)
 ```
 
@@ -25,9 +28,10 @@ make up
 
 | Var | Required | Default | Notes |
 |---|---|---|---|
-| `OPENAI_API_KEY` | one of | — | Used by LiteLLM for `gpt-*` models |
-| `ANTHROPIC_API_KEY` | one of | — | Used by LiteLLM for `claude-*` models |
-| `GEMINI_API_KEY` | one of | — | Used by LiteLLM for `gemini-*` models |
+| `PRISM_CREDS_KEY` | yes after Phase 9 | — | Base64 Fernet key used to decrypt saved provider credentials. Must be stable across restarts. Generate with `python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`. |
+| `OPENAI_API_KEY` | legacy/dev | — | Legacy provider env fallback before Phase 9 cutover. Saved Settings credentials supersede this. |
+| `ANTHROPIC_API_KEY` | legacy/dev | — | Legacy provider env fallback before Phase 9 cutover. Saved Settings credentials supersede this. |
+| `GEMINI_API_KEY` | legacy/dev | — | Legacy provider env fallback before Phase 9 cutover. Saved Settings credentials supersede this. |
 | `DATABASE_URL` | yes | `postgres://prism:prism@postgres:5432/prism` | Wired by Compose |
 | `REDIS_URL` | yes | `redis://redis:6379/0` | Wired by Compose |
 | `INGESTION_URL` | yes | `http://ingestion:8001` | What the SDK posts to |
@@ -84,17 +88,19 @@ The Python workspace is managed by `uv`; the root `uv.lock` is the canonical Pyt
 This is also the verification script and the Loom outline.
 
 1. `make up` → wait for all services to report healthy in `make logs`.
-2. Open the chatbot UI. Have a 3-turn streaming conversation against `gpt-4o`.
-3. Switch model to `claude-sonnet-4-6`. Have another 3-turn conversation.
-4. `make psql`, then `SELECT count(*), model FROM inference_logs GROUP BY model;` — expect rows split across both models.
-5. `curl http://localhost:8000/v1/metrics?from=...` — returns rollup rows for both models.
-6. Open dashboard — latency / throughput / errors charts populated for both models.
-7. Ask a tool-triggering question, e.g. `"what time is it now?"`; `SELECT tool_name, status FROM tool_invocations ORDER BY created_at DESC LIMIT 1;` — expect a `now` or `web_search` row.
-8. **Failure test:** `docker compose stop ingestion-api`. Send 5 more chat messages. Chatbot continues to work (SDK queues events). `docker compose start ingestion-api`. Within 5s, queue drains; new rows in `inference_logs`.
-9. **PII test:** send `"my email is foo@example.com and SSN 123-45-6789"`. `SELECT prompt_preview FROM inference_logs ORDER BY created_at DESC LIMIT 1;` — preview is redacted.
-10. **Restart test:** `make down && make up`. Existing conversations load in the UI. No data loss.
+2. After Phase 9, open Settings and add/test/save at least one provider credential. Before Phase 9, set one legacy provider env var in `.env`.
+3. Open the chatbot UI. Have a 3-turn streaming conversation against a discovered model.
+4. Switch model/provider if another credential exists. Have another 3-turn conversation.
+5. Start a long response and press Stop/Esc. The partial assistant message remains visible with `status=cancelled`.
+6. `make psql`, then `SELECT count(*), model FROM inference_logs GROUP BY model;` — expect rows split across models used.
+7. `curl http://localhost:8000/v1/metrics?from=...` — returns rollup rows for active models.
+8. Open dashboard — latency / throughput / errors charts populated.
+9. Ask a tool-triggering question, e.g. `"what time is it now?"`; `SELECT tool_name, status FROM tool_invocations ORDER BY created_at DESC LIMIT 1;` — expect a `now` or `web_search` row.
+10. **Failure test:** `docker compose stop ingestion-api`. Send 5 more chat messages. Chatbot continues to work (SDK queues events). `docker compose start ingestion-api`. Within 5s, queue drains; new rows in `inference_logs`.
+11. **PII test:** send `"my email is foo@example.com and SSN 123-45-6789"`. `SELECT prompt_preview FROM inference_logs ORDER BY created_at DESC LIMIT 1;` — preview is redacted.
+12. **Restart test:** `make down && make up`. Existing conversations and saved credentials load in the UI. No data loss.
 
-All 10 steps pass → ready to submit.
+All 12 steps pass → ready to submit.
 
 ## Common operations
 
@@ -126,7 +132,8 @@ Partition-cron will not recreate past partitions.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Chatbot returns 5xx | Provider key missing or invalid | Check `.env`; `make logs SERVICE=chatbot-api` |
+| Chatbot returns `400 no_credential` | No saved default credential for the requested provider | Open Settings, add/test/save a credential, and mark it default |
+| Chatbot returns 5xx | Provider key invalid, `PRISM_CREDS_KEY` invalid, or provider unavailable | Check Settings test result and `make logs SERVICE=chatbot-api` |
 | Dashboard empty | metrics-roller hasn't flushed yet (60s window) or no traffic | Wait, or check `SELECT * FROM metrics_minute ORDER BY minute_bucket DESC LIMIT 5;` |
 | `inference_logs` empty but chat works | Ingestion or writer down | `docker compose ps`, then `make logs SERVICE=ingestion-api` and `SERVICE=log-writer` |
 | Redis stream growing without bound | Writer consumer lag | Check writer heartbeat; restart if hung; inspect `XINFO GROUPS inference.logged` for pending entries |

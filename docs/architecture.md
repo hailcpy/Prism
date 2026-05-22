@@ -8,7 +8,7 @@ Prism is a takehome for ollive.ai. The brief: build a lightweight inference logg
 Multi-provider, streaming responses, dashboards, Docker Compose one-command setup, PII redaction, event-based architecture.
 
 ### Out-of-scope bonuses
-k8s self-hosted deploy, cancel/list/resume frontend.
+k8s self-hosted deploy and full resume UX. Basic in-flight cancellation is part of Phase 9.
 
 ### Locked decisions (see `adr/` for rationale)
 - **Stack:** Python everywhere — FastAPI services, LiteLLM provider abstraction, React/Next.js for chatbot UI. (ADR-0001)
@@ -21,7 +21,7 @@ k8s self-hosted deploy, cancel/list/resume frontend.
 
 A working slice with these capabilities:
 
-1. **Chatbot UI** — multi-turn chat, short context window, model selector (OpenAI / Anthropic / Gemini via LiteLLM), streaming token-by-token responses.
+1. **Chatbot UI** — multi-turn chat, short context window, model selector (OpenAI / Anthropic / Gemini via LiteLLM), streaming token-by-token responses, and in-flight cancellation.
 2. **Python SDK** (`prism-sdk`) — wraps LiteLLM, captures metadata, emits log events fire-and-forget to ingestion.
 3. **Ingestion API** — FastAPI; validates SDK payloads, redacts PII, publishes to Redis Streams.
 4. **Workers** consuming Redis Streams:
@@ -29,9 +29,10 @@ A working slice with these capabilities:
    - `metrics-roller` — 60-second rollups into `metrics_minute` for the dashboard.
 5. **Dashboard** — read-only page showing latency p50/p95, throughput, error rate, token usage per model. Reads `metrics_minute`, not raw logs.
 6. **Conversations API** — list conversations and messages (chatbot needs this to render history).
-7. **Docker Compose** — one command brings the whole system up.
+7. **Credential Settings** — single-tenant provider credentials stored in Postgres, encrypted with Fernet at rest. See ADR-0014.
+8. **Docker Compose** — one command brings the whole system up.
 
-**Explicit non-goals:** auth/multi-tenancy, k8s, eval/replay, prompt management, RAG, tool calling, cost-per-call pricing UI, cancel/resume conversations.
+**Explicit non-goals:** auth/multi-tenancy, k8s, eval/replay, prompt management, RAG, cost-per-call pricing UI, full resume UX.
 
 ---
 
@@ -41,6 +42,7 @@ A working slice with these capabilities:
 |---|---|---|
 | `Conversation` | Chat session. Owns messages. Has model/system-prompt defaults. | Postgres `conversations` / unchanged |
 | `Message` | One turn (user or assistant) in a conversation. User-visible chat history. | Postgres `messages` / unchanged |
+| `ProviderCredential` | Single-tenant saved provider secrets and non-secret metadata. Secrets encrypted by Fernet. | Postgres `provider_credentials` / unchanged until auth exists |
 | `InferenceLog` | One LLM call. Latency, tokens, status, model, provider, request/response previews. Append-only. | Postgres `inference_logs` (partitioned) / **ClickHouse** later |
 | `RawPayload` | Full request + response JSON. Large, rarely read. | Postgres `inference_logs.raw_payload_jsonb` today / **S3 referenced by `raw_payload_uri`** later |
 | `MetricsMinute` | Per-(minute, model, provider) rollup: count, p50/p95 latency, errors, token sums. | Postgres `metrics_minute` / **ClickHouse materialized view** later |
@@ -173,6 +175,7 @@ Full DDL and partition strategy in [`schema.md`](schema.md). Headline:
   - **B. Inference logs** — `inference_logs`, partitioned daily by `created_at` (OLAP, append-only).
   - **C. Rollups** — `metrics_minute` (read-optimized, denormalized).
 - **No FKs between groups.** Links are soft (e.g. `inference_logs.message_id`). This means any group can move to a different store without unwinding DB constraints. (ADR-0008)
+- **Provider credentials are Group A app data.** The API returns only redacted credential summaries; provider keys are not stored in the browser or sent as per-request headers once Phase 9 lands. (ADR-0014)
 - **`raw_payload_uri` exists from day one** alongside `raw_payload_jsonb`. Today, writes go to jsonb; readers check `if uri: fetch_from(uri) else: read_jsonb`. When S3 lands, writes flip to the URI column. Readers don't change. (ADR-0002)
 - **All log table access goes through a `LogStore` interface.** Today: `PostgresLogStore`. Future: `ClickHouseLogStore` + `S3RawPayloadStore` slot in via DI; business logic doesn't move. (ADR-0005)
 
@@ -184,6 +187,8 @@ See [`api-contracts.md`](api-contracts.md) for the full spec. Surfaces:
 
 - **SDK → Ingestion:** `POST /v1/events:batch`
 - **Chatbot UI ↔ Chatbot API:**
+  - `GET /v1/providers`
+  - `GET|POST|PATCH|DELETE /v1/credentials`
   - `POST /v1/conversations`
   - `GET /v1/conversations/:id/messages`
   - `POST /v1/conversations/:id/messages` (SSE for streaming)

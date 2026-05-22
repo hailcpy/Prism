@@ -124,6 +124,102 @@ Per-event failures (size > 256 KiB, missing required fields, bad enum value) are
 
 ## Chatbot UI ↔ Chatbot API
 
+### `GET /v1/providers`
+
+Return the provider catalog that drives the Settings credential form.
+
+```json
+{
+  "providers": [
+    {
+      "id": "openai",
+      "label": "OpenAI",
+      "secret_fields": [
+        { "name": "api_key", "label": "API key", "required": true }
+      ],
+      "metadata_fields": []
+    },
+    {
+      "id": "bedrock",
+      "label": "Amazon Bedrock",
+      "secret_fields": [
+        { "name": "aws_access_key_id", "label": "Access key ID", "required": true },
+        { "name": "aws_secret_access_key", "label": "Secret access key", "required": true },
+        { "name": "aws_session_token", "label": "Session token", "required": false }
+      ],
+      "metadata_fields": [
+        { "name": "aws_region", "label": "AWS region", "required": true, "default": "us-west-2" }
+      ]
+    }
+  ]
+}
+```
+
+Provider IDs are canonical API values. The backend registry maps them to LiteLLM provider names and client argument names.
+
+### `GET /v1/credentials`
+
+List saved credentials. Secrets are never returned.
+
+```json
+{
+  "credentials": [
+    {
+      "id": "uuid",
+      "provider": "openai",
+      "name": "personal-openai",
+      "metadata": {},
+      "is_default": true,
+      "last_tested_at": "2026-05-22T10:00:00Z",
+      "last_test_ok": true,
+      "last_test_error": null
+    }
+  ]
+}
+```
+
+### `POST /v1/credentials`
+
+Create a saved credential. `secrets` are encrypted server-side with Fernet and never returned.
+
+```json
+{
+  "provider": "openai",
+  "name": "personal-openai",
+  "secrets": { "api_key": "sk-..." },
+  "metadata": {},
+  "is_default": true
+}
+```
+
+### `PATCH /v1/credentials/:id`
+
+Update credential label, secret fields, metadata, or default flag. Setting `is_default=true` must be transactional and unset any existing default for the same provider.
+
+### `DELETE /v1/credentials/:id`
+
+Delete a saved credential.
+
+### `POST /v1/credentials/:id/test`
+
+Validate a saved credential, persist `last_tested_at`, `last_test_ok`, and a scrubbed `last_test_error`, then return the result.
+
+```json
+{ "ok": true, "models": ["gpt-4o", "gpt-4.1"] }
+```
+
+### `POST /v1/credentials/test`
+
+Validate an unsaved credential payload. This lets the UI test before Save. The backend must not mutate `os.environ` while testing.
+
+```json
+{
+  "provider": "openai",
+  "secrets": { "api_key": "sk-..." },
+  "metadata": {}
+}
+```
+
 ### `POST /v1/conversations`
 
 Create a conversation.
@@ -156,8 +252,8 @@ List conversations (most recent first). Pagination via `?cursor=`.
 // Response 200
 {
   "messages": [
-    { "id": "uuid", "role": "user", "content": "...", "created_at": "..." },
-    { "id": "uuid", "role": "assistant", "content": "...", "created_at": "..." }
+    { "id": "uuid", "role": "user", "status": "ok", "content": "...", "created_at": "..." },
+    { "id": "uuid", "role": "assistant", "status": "cancelled", "content": "partial...", "created_at": "..." }
   ]
 }
 ```
@@ -170,6 +266,15 @@ Send a user message, stream the assistant reply.
 ```json
 { "role": "user", "content": "hello", "model": "gpt-4o" }
 ```
+
+The backend resolves the requested model's provider credential before creating messages. If no saved default credential exists for that provider:
+
+```json
+// Response 400
+{ "error": "no_credential", "provider": "openai" }
+```
+
+No user or assistant message rows are created on this failure path.
 
 **Response** — `Content-Type: text/event-stream`
 
@@ -189,6 +294,8 @@ On error mid-stream:
 event: error
 data: {"error": {"type": "...", "message": "..."}}
 ```
+
+On client cancellation, the browser usually disconnects before it can receive a final SSE event. The server still persists the partial assistant message with `status="cancelled"` and keeps whatever content was collected before cancellation.
 
 ---
 

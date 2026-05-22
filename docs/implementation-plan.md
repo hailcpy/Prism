@@ -4,14 +4,14 @@
 
 This is a takehome for **ollive.ai** (Fullstack Engineer). The brief is to build a lightweight inference logging + ingestion system for an LLM application, in four parts: a chatbot, an SDK that wraps LLM calls and captures metadata, an ingestion pipeline, and a database. The grading rubric explicitly calls out *schema design and practical tradeoffs* — so the architecture must show judgment, not just code volume.
 
-The "guaranteed interview" bonus list (multi-provider, streaming, dashboards, Docker Compose, event-based architecture, PII redaction, k8s, frontend cancel/list/resume) is partially in scope: we commit to **multi-provider, streaming, dashboards, Docker Compose, PII redaction, and event-based architecture**. k8s and cancel/resume frontend are explicitly **out of scope** to keep the takehome shippable.
+The "guaranteed interview" bonus list (multi-provider, streaming, dashboards, Docker Compose, event-based architecture, PII redaction, k8s, frontend cancel/list/resume) is partially in scope: we commit to **multi-provider, streaming, dashboards, Docker Compose, PII redaction, event-based architecture, and basic in-flight cancellation**. k8s and full resume UX remain out of scope to keep the takehome shippable.
 
 ### Locked decisions (from clarification)
 - **Stack:** Python everywhere — FastAPI for services, LiteLLM for provider abstraction, React/Next.js only for the chatbot UI.
 - **Storage:** Single Postgres now, **but engineered so the OLTP/OLAP/blob split (Postgres + ClickHouse + S3) can drop in without refactoring callers**. This is a hard constraint, not a nice-to-have.
 - **Event bus:** Redis Streams (with a `Bus` abstraction so Kafka can swap in later).
 - **Bonuses in scope:** multi-provider, streaming, dashboards, Docker Compose, PII redaction, event-based architecture.
-- **Bonuses out of scope:** k8s deploy, cancel/list/resume frontend.
+- **Bonuses out of scope:** k8s deploy and full resume UX. Basic in-flight cancellation is now in scope for Phase 9.
 
 ---
 
@@ -61,7 +61,7 @@ A working slice with these capabilities:
 6. **Conversations API** — list conversations + messages (chatbot already needs this to render history).
 7. **Docker Compose** — one command brings the whole system up.
 
-**Explicit non-goals:** auth/multi-tenancy, k8s, eval/replay, prompt management, RAG, tool calling, cost-per-call pricing UI, cancel/resume conversations.
+**Explicit non-goals:** auth/multi-tenancy, k8s, eval/replay, prompt management, RAG, cost-per-call pricing UI, full resume UX. In-flight cancellation is in scope for Phase 9.
 
 ---
 
@@ -330,7 +330,7 @@ Same shape as the SDK event after PII redaction. Versioned via `schema_version` 
 - `chatbot-ui` (Next.js dev server)
 - `partition-cron` (lightweight container that creates tomorrow's partition nightly)
 
-`.env.example` documents every var: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DATABASE_URL`, `REDIS_URL`, `INGESTION_URL`, `PRISM_KEEP_RAW`, etc.
+`.env.example` documents every var: `PRISM_CREDS_KEY`, legacy provider env fallbacks, `DATABASE_URL`, `REDIS_URL`, `INGESTION_URL`, `PRISM_KEEP_RAW`, etc.
 
 Make targets: `make up`, `make down`, `make logs`, `make seed`, `make test`, `make demo` (opens UI + dashboard tabs).
 
@@ -368,6 +368,7 @@ Make targets: `make up`, `make down`, `make logs`, `make seed`, `make test`, `ma
 11. **ADR-0011** — SDK captures via a LiteLLM `CustomLogger` callback, not a call-site wrapper. Enables transparent capture inside agent runtimes (Strands) that own the LLM call site.
 12. **ADR-0012** — Tool-call traces via Strands hooks (`prism_sdk.strands.PrismStrandsHooks`). Introduces a `ToolInvocationEvent` event type and a `tool_invocations` table.
 13. **ADR-0013** — Custom dashboards are constrained: pre-built widgets bound to a whitelisted metric vocabulary, no user SQL, no user-defined metrics, no alerts or real-time in v1. Bounds query cost, eliminates injection surface, and keeps the contract swap-compatible with a future ClickHouse rollup.
+14. **ADR-0014** — Provider credentials are single-tenant app data, encrypted in Postgres with Fernet. Browser `localStorage` keys, `x-prism-*` credential headers, and backend env fallback are superseded.
 
 ---
 
@@ -483,12 +484,65 @@ All metric kinds except `top_conversations_by_cost` read from `metrics_minute`. 
 
 **Demoable:** drag-and-drop dashboard editor in the chat UI; create "Cost overview" with bignum (`cost_usd_sum`), timeseries (`cost_usd_sum` per minute), pie (`cost_usd_sum` by model), table (`top_conversations_by_cost`); reload the page and see the same layout populated with live data.
 
-### Phase 9 — Polish + submission (½ day)
-- [ ] README: setup, architecture overview, schema decisions, tradeoffs, future improvements.
-- [ ] Loom demo: chat → log appears → dashboard updates → tool call → tool row appears → custom dashboard build & save → kill ingestion → SDK queue resilience → restart → drains.
-- [ ] Final pass on all ADRs (any decision that changed during build).
+### Phase 9 — DB-backed credentials, cancellation, and UI foundation (1½–2 days)
 
-**Estimate remaining from here:** ~2 working days (Phase 8 dashboards + Phase 9 polish).
+This phase replaces the weakest product surface: browser-stored provider keys and a monolithic chat page. It is intentionally backend-first so credential behavior can be tested before UI changes hide failures. See **ADR-0014**.
+
+**Goal:** a user can open Settings, add/test/save provider credentials, select a discovered model, start a streaming chat, cancel it, and see the partial assistant message persist with `status=cancelled`.
+
+**Out of scope for Phase 9:**
+- Auth or per-user credential ownership. `owner_id` / `user_id` remains future work.
+- Key rotation UI. Fernet key rotation is documented as a future `MultiFernet` migration.
+- Full metrics/dashboards redesign. Only minimal shell/style changes are needed to keep navigation coherent.
+- Process-env provider keys as a primary path. They may stay only as a documented legacy/dev fallback until this phase is fully cut over.
+
+**Backend tasks:**
+- [ ] ADR: keep ADR-0014 as Proposed during implementation, then mark Accepted once this phase lands.
+- [ ] Schema: add `provider_credentials` to both `infra/sql/init.sql` and `infra/sql/migrations.sql`.
+- [ ] Schema: record assistant lifecycle status either as `messages.status` (`pending|ok|error|cancelled`) or as documented `metadata_jsonb.status`; expose it in `MessageBody`.
+- [ ] Infra: add `infra/prism_infra/crypto.py` with a Fernet helper that validates `PRISM_CREDS_KEY` and never falls back to plaintext.
+- [ ] Infra: add `infra/prism_infra/storage/credentials.py` with a protocol plus Postgres implementation. All credential SQL lives here.
+- [ ] Dependency: add `cryptography` to the package that owns the Fernet helper, and make sure chatbot-api receives it through workspace deps.
+- [ ] Provider registry: centralize provider names, expected secret fields, metadata fields, LiteLLM provider names, and client-arg mapping. Include OpenAI, Anthropic, Gemini/Google, XAI, Fireworks, and Bedrock if supported by the installed LiteLLM version.
+- [ ] LiteLLM shim: validate credentials without mutating `os.environ`. Prefer `litellm.get_valid_models(api_key=..., custom_llm_provider=...)`; use direct `boto3.client(...)` args for Bedrock STS validation.
+- [ ] API: add `services/chatbot-api/chatbot_api/credentials.py` and mount it under `/v1/credentials`.
+- [ ] API: implement `GET /v1/providers`, CRUD endpoints, saved-credential test, and unsaved-payload test. Responses never include secrets.
+- [ ] API: sanitize and length-cap `last_test_error`.
+- [ ] API: make default selection transactional so one provider has at most one default credential.
+- [ ] Chat path: resolve provider credential before creating user/assistant messages. If absent, return `400 {"error":"no_credential","provider":"..."}`.
+- [ ] Chat path: remove browser-header credential parsing and remove env fallback from model discovery after Settings flow is working.
+- [ ] Model discovery: `/v1/models` reads saved credentials, returns discovered models plus provider-specific errors. Empty model list is valid and should point the UI to Settings.
+- [ ] Cancellation: frontend abort must result in the server persisting collected assistant content as `cancelled`. Handle both `request.is_disconnected()` checks between events and `asyncio.CancelledError` while awaiting the stream.
+- [ ] Tests: credential storage/encryption round trip, missing/invalid Fernet key, default uniqueness, API redaction, no orphan messages when credentials are missing, cancellation persists partial content, and `rg 'x-prism-' services web` returns nothing once cutover is complete.
+
+**Frontend tasks:**
+- [ ] Install and pin Tailwind/shadcn/lucide/framer-motion/sonner deps. Commit `components.json`, `tailwind.config.ts`, and `postcss.config.js`.
+- [ ] Add `web/lib/api.ts` with typed fetch wrappers, SSE parsing, credential endpoints, and AbortSignal support.
+- [ ] Add a lightweight app shell with sidebar nav: Chat, Metrics, Dashboards, Settings.
+- [ ] Add `web/app/settings/page.tsx` with tabs for Credentials, Appearance, and About. Credentials tab is the required path for Phase 9.
+- [ ] Settings credentials UI: provider select driven by `GET /v1/providers`, dynamic fields, Test button for unsaved payloads, Save, Delete, and default toggle.
+- [ ] Chat page: remove credential modal and `localStorage` credential code; model picker reads `/v1/models`.
+- [ ] Chat composer: use `AbortController`; while streaming, submit becomes Stop. Esc also cancels.
+- [ ] Chat messages: render `pending`, `error`, and `cancelled` statuses; keep partial cancelled assistant text visible.
+- [ ] Keybindings: implement only the high-value set in Phase 9 (`Esc`, `Cmd/Ctrl+Enter`, `Cmd/Ctrl+,`, `Cmd/Ctrl+B`, `j/k` or up/down navigation). Defer command palette if it slows the phase.
+- [ ] Metrics/dashboards: only port enough styling to fit the new shell. Avoid a full Recharts/dashboard rewrite in this phase.
+
+**Verification:**
+- [ ] `make format && make check`.
+- [ ] Start API with `PRISM_CREDS_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')`.
+- [ ] In Settings, add a valid provider credential, click Test, Save, mark default, restart API, confirm credential persists and models resolve.
+- [ ] Add a bad key, click Test, confirm a scrubbed error appears and no secret value is shown.
+- [ ] `rg 'x-prism-' services web` returns nothing after final cutover.
+- [ ] With no saved credential for the requested provider, chat returns `400 no_credential` and creates no user/assistant rows.
+- [ ] Start a long generation, click Stop or press Esc. The stream ends promptly, partial content remains visible, persisted message status is `cancelled`, and the next request works.
+- [ ] Existing metrics and dashboards still render after the shell changes.
+
+### Phase 10 — Final polish + submission (½ day)
+- [ ] README: setup, architecture overview, schema decisions, tradeoffs, future improvements.
+- [ ] Loom demo: Settings credential add/test/save → chat → cancel → log appears → dashboard updates → tool call → tool row appears → custom dashboard build & save → kill ingestion → SDK queue resilience → restart → drains.
+- [ ] Final pass on all ADRs (any Proposed decision implemented during build is marked Accepted).
+
+**Estimate remaining from here:** ~3–4 working days (Phase 8 dashboards, Phase 9 credential/cancel/UI foundation, Phase 10 polish).
 
 ---
 
@@ -497,13 +551,15 @@ All metric kinds except `top_conversations_by_cost` read from `metrics_minute`. 
 End-to-end smoke (this is the demo script too):
 
 1. `docker compose up` → all services healthy in `make logs`.
-2. Open chatbot UI; have a 3-turn streaming conversation against GPT-4o.
-3. Switch model to Claude; have another 3-turn conversation.
-4. `psql`: `SELECT count(*), model FROM inference_logs GROUP BY model` → expect 6 rows split across models.
-5. Hit `GET /v1/metrics?from=now-10m` → returns rollup rows for both models.
-6. Open dashboard → latency/throughput charts show both models.
-7. **Failure test:** `docker compose stop ingestion-api`. Send 5 more chat messages. Chatbot still works (logs queue in SDK). `docker compose start ingestion-api`. Within 5s, queue drains; new rows in `inference_logs`.
-8. **PII test:** send a message containing a fake email + SSN. `SELECT prompt_preview FROM inference_logs ORDER BY created_at DESC LIMIT 1` → confirm redacted.
-9. **Restart test:** restart all containers; existing conversations still load in UI; no data loss in DB.
+2. If Phase 9 is complete, open Settings and add/test/save at least one provider credential.
+3. Open chatbot UI; have a 3-turn streaming conversation against a discovered model.
+4. Switch model/provider if another saved credential exists; have another 3-turn conversation.
+5. **Cancellation test:** start a long response, press Stop/Esc, confirm partial assistant content persists with `status=cancelled`.
+6. `psql`: `SELECT count(*), model FROM inference_logs GROUP BY model` → expect rows split across models used.
+7. Hit `GET /v1/metrics?from=now-10m` → returns rollup rows for active models.
+8. Open dashboard → latency/throughput charts show activity.
+9. **Failure test:** `docker compose stop ingestion-api`. Send 5 more chat messages. Chatbot still works (logs queue in SDK). `docker compose start ingestion-api`. Within 5s, queue drains; new rows in `inference_logs`.
+10. **PII test:** send a message containing a fake email + SSN. `SELECT prompt_preview FROM inference_logs ORDER BY created_at DESC LIMIT 1` → confirm redacted.
+11. **Restart test:** restart all containers; existing conversations and saved credentials still load; no data loss in DB.
 
-All 9 steps pass → ready to submit.
+All 11 steps pass → ready to submit.

@@ -37,3 +37,4 @@ What becomes easier, what becomes harder, what we'll have to revisit. Both posit
 | [0011](0011-sdk-as-litellm-callback-supersedes-0004.md) | SDK captures via LiteLLM callback (supersedes 0004) | Accepted |
 | [0012](0012-strands-tool-hooks.md) | Tool-call traces via Strands hooks | Accepted |
 | [0013](0013-constrained-dashboard-widgets.md) | Custom dashboards use whitelisted widgets; no user SQL | Accepted |
+| [0014](0014-db-backed-provider-credentials.md) | DB-backed provider credentials with Fernet at rest | Proposed |

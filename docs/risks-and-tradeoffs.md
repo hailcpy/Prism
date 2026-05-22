@@ -12,6 +12,8 @@ Each row is a known weakness, what mitigates it, and what we accept.
 | Streaming responses race with logging | One log per stream completion (success / error / cancelled), with TTFT + total latency | Mid-stream telemetry is not captured per-token (would 100x event volume for little signal). (ADR-0007) |
 | Schema drift between SDK and ingestion | `schema_version` field; Pydantic is strict on required fields, lenient on additional ("ignore extra") | Forward-compat: old SDKs work after ingestion adds fields. Back-compat: old ingestion ignores new SDK fields. |
 | Provider quirks (token counting, error shapes) | LiteLLM normalizes most of this. Where it can't, we record `null` rather than fabricate values | Some `completion_tokens` may be missing for niche providers; dashboard renders these as "unknown" not "0". |
+| Stored provider credentials add secret-management risk | Encrypt with Fernet using a stable `PRISM_CREDS_KEY`; never return secrets from API; scrub validation errors; no browser `localStorage` or per-request credential headers after Phase 9 | Local single-tenant demo only. No auth boundary exists yet, so the API must not be exposed publicly. Key rotation is future work. (ADR-0014) |
+| Losing `PRISM_CREDS_KEY` makes saved credentials undecryptable | Document key generation and require operators to keep it stable across restarts | We do not auto-generate ephemeral keys at boot. Recovery from lost key means deleting/re-entering credentials. |
 | Soft FK from `inference_logs.message_id` to `messages.id` can dangle if a conversation is deleted | Intentional. App data can be deleted; observability data must outlive it for audit purposes | Orphan logs are a feature, not a bug. They're queryable via `metadata_jsonb` and `created_at`. |
 | Single Postgres is a SPOF for demo | Acknowledged. Demo only. | Production deploy would split app data and logs to separate clusters with different HA policies. |
 | `raw_payload_jsonb` bloats the table | Today we write previews + jsonb; rows can be large. Mitigation: don't index jsonb in v1; toast handles compression. Long-term: S3 path. | OK at demo scale. The whole point of `raw_payload_uri` existing today is to make this trivially fixable. (ADR-0002) |
@@ -26,7 +28,7 @@ Each row is a known weakness, what mitigates it, and what we accept.
 2. **Auth + multi-tenancy** — currently single-tenant. Adding an `org_id` to every event + row is mechanical.
 3. **Replay & eval** — once `raw_payload` lives in S3, deterministic replay against a held-out test set falls out.
 4. **Cost dashboard** — a `cost-calculator` consumer that joins `usage` with a `model_prices` table → `cost_usd` column.
-5. **Cancel / list / resume frontend** — wire `AbortController` through SSE → log a `cancelled` status; UI for listing conversations is a 1-day add.
+5. **Auth + credential ownership** — Phase 9 keeps credentials single-tenant. Production needs org/user ownership, audit logs, and key rotation.
 6. **k8s** — Helm chart with separate StatefulSets for PG/Redis, Deployments for stateless services, HPA on ingestion-api and workers.
 7. **PII redaction upgrade** — swap regex for Microsoft Presidio or a small model; keep the same interface.
 8. **Tracing** — OpenTelemetry across SDK → ingestion → worker → DB. Spans correlate with `inference_id`.

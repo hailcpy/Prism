@@ -4,7 +4,7 @@
 
 | Group | Tables | Workload | Today | Future |
 |---|---|---|---|---|
-| A. App data | `conversations`, `messages` | OLTP, mutable, low volume | Postgres | Postgres (unchanged) |
+| A. App data | `conversations`, `messages`, `provider_credentials` | OLTP, mutable, low volume | Postgres | Postgres (unchanged) |
 | B. Inference logs | `inference_logs`, `tool_invocations` | OLAP, append-only, high volume | Postgres (partitioned) | ClickHouse + S3 (raw payloads) |
 | C. Rollups | `metrics_minute` | Read-optimized, denormalized | Postgres | ClickHouse materialized view |
 
@@ -30,18 +30,44 @@ CREATE INDEX conversations_user_updated_idx
   ON conversations (user_id, updated_at DESC);
 
 CREATE TYPE message_role AS ENUM ('user', 'assistant', 'system');
+CREATE TYPE message_status AS ENUM ('pending', 'ok', 'error', 'cancelled');
 
 CREATE TABLE messages (
   id              UUID PRIMARY KEY,
   conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   role            message_role NOT NULL,
+  status          message_status NOT NULL DEFAULT 'ok',
   content         TEXT NOT NULL,
+  metadata_jsonb  JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX messages_conv_created_idx
   ON messages (conversation_id, created_at);
+
+CREATE TABLE provider_credentials (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider          TEXT NOT NULL,
+  name              TEXT NOT NULL,
+  secrets_enc       BYTEA NOT NULL,
+  metadata          JSONB NOT NULL DEFAULT '{}'::jsonb,
+  is_default        BOOLEAN NOT NULL DEFAULT FALSE,
+  last_tested_at    TIMESTAMPTZ,
+  last_test_ok      BOOLEAN,
+  last_test_error   TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (provider, name)
+);
+
+CREATE UNIQUE INDEX provider_credentials_one_default_per_provider
+  ON provider_credentials (provider)
+  WHERE is_default;
 ```
+
+`provider_credentials.secrets_enc` is a Fernet ciphertext over a provider-specific JSON object. Non-secret fields such as AWS region live in `metadata`. API responses never include decrypted secrets. See ADR-0014.
+
+`messages.status` records the visible assistant lifecycle. A cancelled stream keeps the partial assistant content and sets `status='cancelled'`; provider errors keep the row with `status='error'`. If the implementation stores this in `metadata_jsonb.status` instead of a physical column, the API contract remains the same.
 
 ### Group B — Inference logs
 
