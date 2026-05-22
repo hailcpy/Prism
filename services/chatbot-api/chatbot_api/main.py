@@ -11,22 +11,22 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol, cast
 
-import boto3
-import httpx
-import litellm
 import psycopg
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 from strands import Agent, tool
 from strands.models.litellm import LiteLLMModel
 
 import prism_sdk
+from chatbot_api import llm
+from chatbot_api.credentials import router as credentials_router
 from chatbot_api.dashboards import router as dashboards_router
+from prism_infra.crypto import CredentialsCrypto
 from prism_infra.models import MetricsQuery
-from prism_infra.storage import LogStore, PostgresLogStore, run_migrations
+from prism_infra.storage import LogStore, PostgresCredentialStore, PostgresLogStore, run_migrations
 from prism_sdk import PrismClient
 from prism_sdk.strands import PrismStrandsHooks
 
@@ -48,6 +48,7 @@ class Message:
     id: str
     conversation_id: str
     role: MessageRole
+    status: str
     content: str
     created_at: datetime
     metadata: dict[str, Any] | None = None
@@ -69,6 +70,7 @@ class ChatStore(Protocol):
         conversation_id: str,
         role: MessageRole,
         content: str,
+        status: str = "ok",
         metadata: dict[str, Any] | None = None,
     ) -> Message: ...
 
@@ -76,6 +78,7 @@ class ChatStore(Protocol):
         self,
         message_id: str,
         content: str,
+        status: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Message: ...
 
@@ -152,7 +155,7 @@ class PostgresChatStore:
             cur.execute(
                 """
                 SELECT id::text, conversation_id::text, role::text, content, created_at,
-                       metadata_jsonb
+                       status::text, metadata_jsonb
                 FROM messages
                 WHERE conversation_id = %s
                 ORDER BY created_at ASC
@@ -166,6 +169,7 @@ class PostgresChatStore:
         conversation_id: str,
         role: MessageRole,
         content: str,
+        status: str = "ok",
         metadata: dict[str, Any] | None = None,
     ) -> Message:
         self._ensure_schema()
@@ -173,12 +177,12 @@ class PostgresChatStore:
         with psycopg.connect(self.database_url) as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                INSERT INTO messages (id, conversation_id, role, content, metadata_jsonb)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id::text, conversation_id::text, role::text, content, created_at,
-                          metadata_jsonb
+                INSERT INTO messages (id, conversation_id, role, status, content, metadata_jsonb)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id::text, conversation_id::text, role::text, status::text, content,
+                          created_at, metadata_jsonb
                 """,
-                (message_id, conversation_id, role, content, json.dumps(metadata or {})),
+                (message_id, conversation_id, role, status, content, json.dumps(metadata or {})),
             )
             row = cur.fetchone()
             if row is None:
@@ -193,24 +197,34 @@ class PostgresChatStore:
         self,
         message_id: str,
         content: str,
+        status: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Message:
         self._ensure_schema()
         with psycopg.connect(self.database_url) as conn, conn.cursor(row_factory=dict_row) as cur:
             params: tuple[Any, ...]
             metadata_sql = ""
+            status_sql = ""
             if metadata is not None:
                 metadata_sql = ", metadata_jsonb = %s"
-                params = (content, json.dumps(metadata), message_id)
+                if status is not None:
+                    status_sql = ", status = %s::message_status"
+                    params = (content, status, json.dumps(metadata), message_id)
+                else:
+                    params = (content, json.dumps(metadata), message_id)
             else:
-                params = (content, message_id)
+                if status is not None:
+                    status_sql = ", status = %s::message_status"
+                    params = (content, status, message_id)
+                else:
+                    params = (content, message_id)
             cur.execute(
                 f"""
                 UPDATE messages
-                SET content = %s{metadata_sql}
+                SET content = %s{status_sql}{metadata_sql}
                 WHERE id = %s
-                RETURNING id::text, conversation_id::text, role::text, content, created_at,
-                          metadata_jsonb
+                RETURNING id::text, conversation_id::text, role::text, status::text, content,
+                          created_at, metadata_jsonb
                 """,
                 params,
             )
@@ -253,6 +267,7 @@ class ListConversationsResponse(BaseModel):
 class MessageBody(BaseModel):
     id: str
     role: MessageRole
+    status: str = "ok"
     content: str
     created_at: datetime
     thinking_trace: str | None = None
@@ -320,7 +335,9 @@ app.state.chat_store = None
 app.state.prism_client = None
 app.state.log_store = None
 app.state.dashboard_store = None
+app.state.credential_store = None
 app.include_router(dashboards_router)
+app.include_router(credentials_router)
 
 
 @app.get("/healthz")
@@ -330,8 +347,19 @@ def health() -> dict[str, str]:
 
 @app.get("/v1/models", response_model=ListModelsResponse)
 async def list_models(request: Request) -> ListModelsResponse:
-    credentials = _credentials_from_request(request)
-    return await _discover_models(credentials)
+    credentials = _get_credential_store(request.app).list_credentials()
+    default_credentials = []
+    for credential in credentials:
+        if credential.is_default:
+            full = _get_credential_store(request.app).get_credential_with_secrets(credential.id)
+            if full:
+                default_credentials.append(full)
+    models, errors = await llm.discover_models(default_credentials)
+    if not models:
+        models = [option.model_dump() for option in _fallback_models()]
+    return ListModelsResponse(
+        models=[ModelOption(**item) for item in models], discovery_errors=errors
+    )
 
 
 @app.post("/v1/conversations", status_code=201, response_model=CreateConversationResponse)
@@ -372,21 +400,28 @@ def list_messages(request: Request, conversation_id: str) -> ListMessagesRespons
     )
 
 
-@app.post("/v1/conversations/{conversation_id}/messages")
+@app.post("/v1/conversations/{conversation_id}/messages", response_model=None)
 async def send_message(
     request: Request,
     conversation_id: str,
     body: SendMessageRequest,
-) -> StreamingResponse:
+) -> Response:
     store = _get_store(request.app)
     conversation = store.get_conversation(conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="conversation not found")
 
     previous_messages = store.list_messages(conversation_id)
-    user_message = store.create_message(conversation_id, "user", body.content)
-    assistant_message = store.create_message(conversation_id, "assistant", "")
-    model, provider = _litellm_model_and_provider(body.model or conversation.model_default)
+    model, provider = llm.provider_for_model(body.model or conversation.model_default)
+    credential = _get_credential_store(request.app).get_default_credential_for_provider(provider)
+    if credential is None:
+        return JSONResponse(
+            status_code=400, content={"error": "no_credential", "provider": provider}
+        )
+    user_message = store.create_message(conversation_id, "user", content=body.content)
+    assistant_message = store.create_message(
+        conversation_id, "assistant", status="pending", content=""
+    )
     prism_client = _get_prism_client(request.app)
     inference_id = str(uuid.uuid4())
     prism_metadata = prism_sdk.metadata(
@@ -396,14 +431,13 @@ async def send_message(
         provider=provider,
         extra={"source": "chatbot-api"},
     )
-    credentials = _credentials_from_request(request)
     agent = _build_agent(
         model=model,
         system_prompt=conversation.system_prompt,
         history=previous_messages,
         prism_metadata=prism_metadata,
         prism_client=prism_client,
-        credentials=credentials,
+        credential=credential,
     )
 
     async def event_stream() -> AsyncIterator[bytes]:
@@ -444,18 +478,47 @@ async def send_message(
                 if delta:
                     collected.append(delta)
                     yield _sse("token", {"delta": delta})
-        except (Exception, asyncio.CancelledError) as exc:
-            store.delete_message(assistant_message.id)
-            yield _sse(
-                "error",
-                {"error": {"type": type(exc).__name__, "message": str(exc)}},
+        except asyncio.CancelledError:
+            content = "".join(collected)
+            metadata = {"thinking_trace": "".join(thinking_collected).strip() or None}
+            store.update_message_content(
+                assistant_message.id,
+                content=content,
+                status="cancelled",
+                metadata=metadata,
             )
-            if isinstance(exc, asyncio.CancelledError):
-                raise
+            raise
+        except Exception as exc:
+            content = "".join(collected)
+            metadata = {"thinking_trace": "".join(thinking_collected).strip() or None}
+            status = "cancelled" if await request.is_disconnected() else "error"
+            store.update_message_content(
+                assistant_message.id,
+                content=content,
+                status=status,
+                metadata=metadata,
+            )
+            if status == "error":
+                yield _sse(
+                    "error",
+                    {"error": {"type": type(exc).__name__, "message": str(exc)}},
+                )
+            return
+        if await request.is_disconnected():
+            content = "".join(collected)
+            metadata = {"thinking_trace": "".join(thinking_collected).strip() or None}
+            store.update_message_content(
+                assistant_message.id,
+                content=content,
+                status="cancelled",
+                metadata=metadata,
+            )
             return
         content = "".join(collected)
         if not content:
-            store.delete_message(assistant_message.id)
+            store.update_message_content(
+                assistant_message.id, content="", status="error", metadata={}
+            )
             yield _sse(
                 "error",
                 {"error": {"type": "EmptyResponse", "message": "model returned no content"}},
@@ -463,7 +526,7 @@ async def send_message(
             return
         thinking_trace = "".join(thinking_collected).strip() or None
         metadata = {"thinking_trace": thinking_trace} if thinking_trace else {}
-        store.update_message_content(assistant_message.id, content, metadata)
+        store.update_message_content(assistant_message.id, content, status="ok", metadata=metadata)
         yield _sse(
             "done",
             {
@@ -566,21 +629,20 @@ def _build_agent(
     history: list[Message],
     prism_metadata: dict[str, Any],
     prism_client: PrismClient,
-    credentials: dict[str, str] | None = None,
+    credential: Any,
 ) -> Agent:
     client_args: dict[str, Any] = {
         "metadata": prism_metadata,
     }
-    _, provider, _, _ = litellm.get_llm_provider(model)
-    client_args.update(_litellm_client_args(credentials or {}, provider))
-    llm = LiteLLMModel(
+    client_args.update(llm.litellm_client_args(credential))
+    model_client = LiteLLMModel(
         client_args=client_args,
         model_id=model,
         params={"stream": True},
     )
     strands_history = cast(Any, _strands_messages(history))
     return Agent(
-        model=llm,
+        model=model_client,
         messages=strands_history,
         tools=[now, web_search],
         system_prompt=system_prompt,
@@ -595,201 +657,6 @@ def _strands_messages(history: list[Message]) -> list[dict[str, Any]]:
         for message in history[-12:]
         if message.role in {"user", "assistant"} and message.content
     ]
-
-
-def _litellm_model_and_provider(model: str) -> tuple[str, str]:
-    if model.startswith("bedrock/arn:"):
-        model = f"bedrock/converse/{model.removeprefix('bedrock/')}"
-    _, provider, _, _ = litellm.get_llm_provider(model)
-    return model, provider
-
-
-def _credentials_from_request(request: Request) -> dict[str, str]:
-    header_to_key = {
-        "x-prism-openai-api-key": "openai_api_key",
-        "x-prism-anthropic-api-key": "anthropic_api_key",
-        "x-prism-gemini-api-key": "gemini_api_key",
-        "x-prism-aws-access-key-id": "aws_access_key_id",
-        "x-prism-aws-secret-access-key": "aws_secret_access_key",
-        "x-prism-aws-session-token": "aws_session_token",
-        "x-prism-aws-region": "aws_region",
-    }
-    credentials: dict[str, str] = {}
-    for header, key in header_to_key.items():
-        value = request.headers.get(header)
-        if value:
-            credentials[key] = value.strip()
-    return credentials
-
-
-def _litellm_client_args(credentials: dict[str, str], provider: str) -> dict[str, Any]:
-    client_args: dict[str, Any] = {}
-    if provider == "openai" and credentials.get("openai_api_key"):
-        client_args["api_key"] = credentials["openai_api_key"]
-    if provider == "anthropic" and credentials.get("anthropic_api_key"):
-        client_args["api_key"] = credentials["anthropic_api_key"]
-    if provider in {"gemini", "google"} and credentials.get("gemini_api_key"):
-        client_args["api_key"] = credentials["gemini_api_key"]
-    if provider == "bedrock" and credentials.get("aws_access_key_id"):
-        client_args["aws_access_key_id"] = credentials["aws_access_key_id"]
-    if provider == "bedrock" and credentials.get("aws_secret_access_key"):
-        client_args["aws_secret_access_key"] = credentials["aws_secret_access_key"]
-    if provider == "bedrock" and credentials.get("aws_session_token"):
-        client_args["aws_session_token"] = credentials["aws_session_token"]
-    if provider == "bedrock" and credentials.get("aws_region"):
-        client_args["aws_region_name"] = credentials["aws_region"]
-    return client_args
-
-
-async def _discover_models(credentials: dict[str, str]) -> ListModelsResponse:
-    discovered: list[ModelOption] = []
-    errors: dict[str, str] = {}
-
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        if api_key := credentials.get("openai_api_key") or os.getenv("OPENAI_API_KEY"):
-            try:
-                discovered.extend(await _discover_openai_models(client, api_key))
-            except Exception as exc:  # pragma: no cover - network/provider failure path
-                errors["openai"] = str(exc)
-        if api_key := credentials.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY"):
-            try:
-                discovered.extend(await _discover_anthropic_models(client, api_key))
-            except Exception as exc:  # pragma: no cover - network/provider failure path
-                errors["anthropic"] = str(exc)
-        if api_key := credentials.get("gemini_api_key") or os.getenv("GEMINI_API_KEY"):
-            try:
-                discovered.extend(await _discover_gemini_models(client, api_key))
-            except Exception as exc:  # pragma: no cover - network/provider failure path
-                errors["gemini"] = str(exc)
-
-    try:
-        discovered.extend(_discover_bedrock_models(credentials))
-    except Exception as exc:  # pragma: no cover - network/provider failure path
-        errors["bedrock"] = str(exc)
-
-    models = _dedupe_models(discovered)
-    if not models:
-        models = _fallback_models()
-    return ListModelsResponse(models=models, discovery_errors=errors)
-
-
-async def _discover_openai_models(client: httpx.AsyncClient, api_key: str) -> list[ModelOption]:
-    response = await client.get(
-        "https://api.openai.com/v1/models",
-        headers={"Authorization": f"Bearer {api_key}"},
-    )
-    response.raise_for_status()
-    ids = sorted(
-        item["id"]
-        for item in response.json().get("data", [])
-        if isinstance(item, dict)
-        and isinstance(item.get("id"), str)
-        and item["id"].startswith(("gpt-", "o1", "o3", "o4", "o5", "chatgpt-"))
-    )
-    preferred = _prioritize(ids, ("gpt-4.1", "gpt-4o", "o3", "o4", "gpt-5"))
-    return [
-        ModelOption(
-            id=model_id,
-            label=_model_label(model_id),
-            provider="openai",
-            source="discovered",
-            thinking_supported=model_id.startswith(("o", "gpt-5")),
-        )
-        for model_id in preferred[:40]
-    ]
-
-
-async def _discover_anthropic_models(client: httpx.AsyncClient, api_key: str) -> list[ModelOption]:
-    response = await client.get(
-        "https://api.anthropic.com/v1/models",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-    )
-    response.raise_for_status()
-    ids = sorted(
-        item["id"]
-        for item in response.json().get("data", [])
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    )
-    return [
-        ModelOption(
-            id=model_id,
-            label=_model_label(model_id),
-            provider="anthropic",
-            source="discovered",
-            thinking_supported="claude" in model_id and "3-" not in model_id,
-        )
-        for model_id in ids[:40]
-    ]
-
-
-async def _discover_gemini_models(client: httpx.AsyncClient, api_key: str) -> list[ModelOption]:
-    response = await client.get(
-        "https://generativelanguage.googleapis.com/v1beta/models",
-        params={"key": api_key},
-    )
-    response.raise_for_status()
-    options: list[ModelOption] = []
-    for item in response.json().get("models", []):
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").removeprefix("models/")
-        methods = item.get("supportedGenerationMethods") or []
-        if not name or "generateContent" not in methods:
-            continue
-        model_id = f"gemini/{name}"
-        options.append(
-            ModelOption(
-                id=model_id,
-                label=_model_label(name),
-                provider="gemini",
-                source="discovered",
-                thinking_supported="2.5" in name,
-            )
-        )
-    return options[:40]
-
-
-def _discover_bedrock_models(credentials: dict[str, str]) -> list[ModelOption]:
-    if not (
-        credentials.get("aws_access_key_id")
-        or os.getenv("AWS_ACCESS_KEY_ID")
-        or os.getenv("AWS_PROFILE")
-    ):
-        return []
-    region = (
-        credentials.get("aws_region")
-        or os.getenv("AWS_REGION")
-        or os.getenv("AWS_DEFAULT_REGION", "us-west-2")
-    )
-    kwargs: dict[str, str] = {"region_name": region}
-    if credentials.get("aws_access_key_id"):
-        kwargs["aws_access_key_id"] = credentials["aws_access_key_id"]
-    if credentials.get("aws_secret_access_key"):
-        kwargs["aws_secret_access_key"] = credentials["aws_secret_access_key"]
-    if credentials.get("aws_session_token"):
-        kwargs["aws_session_token"] = credentials["aws_session_token"]
-    client = boto3.client("bedrock", **kwargs)
-    response = client.list_foundation_models()
-    options: list[ModelOption] = []
-    for summary in response.get("modelSummaries", []):
-        model_id = summary.get("modelId")
-        modalities = summary.get("outputModalities") or []
-        if not isinstance(model_id, str) or "TEXT" not in modalities:
-            continue
-        lite_id = f"bedrock/{model_id}"
-        options.append(
-            ModelOption(
-                id=lite_id,
-                label=_model_label(model_id),
-                provider="bedrock",
-                source="discovered",
-                thinking_supported="claude" in model_id and "3-" not in model_id,
-            )
-        )
-    return sorted(options, key=lambda item: item.id)[:80]
 
 
 def _fallback_models() -> list[ModelOption]:
@@ -815,23 +682,6 @@ def _fallback_models() -> list[ModelOption]:
         )
         for model_id, provider, thinking in fallback
     ]
-
-
-def _dedupe_models(models: list[ModelOption]) -> list[ModelOption]:
-    by_id: dict[str, ModelOption] = {}
-    for model in models:
-        by_id.setdefault(model.id, model)
-    if by_id:
-        for fallback in _fallback_models():
-            if fallback.provider in {model.provider for model in by_id.values()}:
-                by_id.setdefault(fallback.id, fallback)
-    return sorted(by_id.values(), key=lambda item: (item.provider, item.label))
-
-
-def _prioritize(values: list[str], prefixes: tuple[str, ...]) -> list[str]:
-    preferred = [value for value in values if value.startswith(prefixes)]
-    rest = [value for value in values if value not in set(preferred)]
-    return preferred + rest
 
 
 def _model_label(model_id: str) -> str:
@@ -943,6 +793,20 @@ def _get_log_store(app: FastAPI) -> LogStore:
     return app.state.log_store
 
 
+def _get_credential_store(app: FastAPI) -> PostgresCredentialStore:
+    if app.state.credential_store is None:
+        creds_key = os.getenv("PRISM_CREDS_KEY")
+        if not creds_key:
+            raise HTTPException(
+                status_code=503,
+                detail="credentials unavailable: PRISM_CREDS_KEY is not configured",
+            )
+        app.state.credential_store = PostgresCredentialStore(
+            os.environ["DATABASE_URL"], CredentialsCrypto(creds_key)
+        )
+    return app.state.credential_store
+
+
 def _get_prism_client(app: FastAPI) -> PrismClient:
     if app.state.prism_client is None:
         sink = os.getenv("PRISM_SDK_SINK", "http")
@@ -972,6 +836,7 @@ def _message_from_row(row: dict[str, Any]) -> Message:
         id=row["id"],
         conversation_id=row["conversation_id"],
         role=row["role"],
+        status=row.get("status") or "ok",
         content=row["content"],
         created_at=row["created_at"],
         metadata=dict(metadata) if isinstance(metadata, dict) else {},
@@ -984,6 +849,7 @@ def _message_body(message: Message) -> MessageBody:
     return MessageBody(
         id=message.id,
         role=message.role,
+        status=message.status,
         content=message.content,
         created_at=message.created_at,
         thinking_trace=thinking_trace if isinstance(thinking_trace, str) else None,

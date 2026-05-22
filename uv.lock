@@ -1275,12 +1275,14 @@ name = "prism-infra"
 version = "0.1.0"
 source = { editable = "infra" }
 dependencies = [
+    { name = "cryptography" },
     { name = "psycopg", extra = ["binary"] },
     { name = "redis" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "redis", specifier = ">=5.0" },
 ]

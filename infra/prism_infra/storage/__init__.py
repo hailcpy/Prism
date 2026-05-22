@@ -1,4 +1,9 @@
 from prism_infra.storage.base import LogStore, RawPayloadStore
+from prism_infra.storage.credentials import (
+    PostgresCredentialStore,
+    ProviderCredential,
+    ProviderCredentialWithSecrets,
+)
 from prism_infra.storage.dashboards import (
     DashboardStore,
     PostgresDashboardStore,
@@ -15,7 +20,10 @@ __all__ = [
     "LocalRawPayloadStore",
     "LogStore",
     "PostgresDashboardStore",
+    "PostgresCredentialStore",
     "PostgresLogStore",
+    "ProviderCredential",
+    "ProviderCredentialWithSecrets",
     "RawPayloadStore",
     "get_top_conversations_by_cost",
     "run_migrations",

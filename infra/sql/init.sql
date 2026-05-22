@@ -1,4 +1,5 @@
 CREATE TYPE message_role AS ENUM ('user', 'assistant', 'system');
+CREATE TYPE message_status AS ENUM ('pending', 'ok', 'error', 'cancelled');
 
 CREATE TYPE inference_status AS ENUM ('ok', 'error', 'timeout', 'cancelled');
 
@@ -20,6 +21,7 @@ CREATE TABLE messages (
   id UUID PRIMARY KEY,
   conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   role message_role NOT NULL,
+  status message_status NOT NULL DEFAULT 'ok',
   content TEXT NOT NULL,
   metadata_jsonb JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -27,6 +29,25 @@ CREATE TABLE messages (
 
 CREATE INDEX messages_conv_created_idx
   ON messages (conversation_id, created_at);
+
+CREATE TABLE provider_credentials (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider TEXT NOT NULL,
+  name TEXT NOT NULL,
+  secrets_enc BYTEA NOT NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  is_default BOOLEAN NOT NULL DEFAULT FALSE,
+  last_tested_at TIMESTAMPTZ,
+  last_test_ok BOOLEAN,
+  last_test_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (provider, name)
+);
+
+CREATE UNIQUE INDEX provider_credentials_one_default_per_provider
+  ON provider_credentials (provider)
+  WHERE is_default;
 
 CREATE TABLE inference_logs (
   id UUID NOT NULL,

@@ -5,55 +5,21 @@ import {
   KeyboardEvent,
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
 
-type Conversation = {
-  id: string;
-  model_default: string;
-  updated_at: string;
-  message_count: number;
-};
-
-type Message = {
-  id: string;
-  role: "user" | "assistant" | "system";
-  content: string;
-  created_at: string;
-  thinking_trace?: string | null;
-};
-
-type ModelOption = {
-  id: string;
-  label: string;
-  provider: string;
-  source: "discovered" | "fallback";
-  thinking_supported: boolean;
-};
-
-type Credentials = {
-  openaiApiKey: string;
-  anthropicApiKey: string;
-  geminiApiKey: string;
-  awsAccessKeyId: string;
-  awsSecretAccessKey: string;
-  awsSessionToken: string;
-  awsRegion: string;
-};
-
-type SseEvent = { event: string; data: Record<string, unknown> };
-
-const defaultCredentials: Credentials = {
-  openaiApiKey: "",
-  anthropicApiKey: "",
-  geminiApiKey: "",
-  awsAccessKeyId: "",
-  awsSecretAccessKey: "",
-  awsSessionToken: "",
-  awsRegion: "us-west-2",
-};
+import {
+  Conversation,
+  Message,
+  ModelOption,
+  apiUrl,
+  createConversation,
+  getConversations,
+  getMessages,
+  getModels,
+  readSseStream,
+} from "@/lib/api";
 
 const fallbackModel: ModelOption = {
   id: "gpt-4o",
@@ -63,379 +29,200 @@ const fallbackModel: ModelOption = {
   thinking_supported: false,
 };
 
-async function* readSseStream(
-  body: ReadableStream<Uint8Array>,
-): AsyncIterableIterator<SseEvent> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let boundary = buffer.indexOf("\n\n");
-      while (boundary !== -1) {
-        const block = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        const parsed = parseSseBlock(block);
-        if (parsed) yield parsed;
-        boundary = buffer.indexOf("\n\n");
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
-
-function parseSseBlock(block: string): SseEvent | null {
-  let event = "message";
-  const dataLines: string[] = [];
-  for (const line of block.split("\n")) {
-    if (line.startsWith("event:")) {
-      event = line.slice(6).trim();
-    } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trim());
-    }
-  }
-  if (dataLines.length === 0) return null;
-  try {
-    return { event, data: JSON.parse(dataLines.join("\n")) };
-  } catch {
-    return null;
-  }
-}
-
-function credentialHeaders(credentials: Credentials): HeadersInit {
-  const headers: Record<string, string> = {};
-  if (credentials.openaiApiKey)
-    headers["x-prism-openai-api-key"] = credentials.openaiApiKey;
-  if (credentials.anthropicApiKey) {
-    headers["x-prism-anthropic-api-key"] = credentials.anthropicApiKey;
-  }
-  if (credentials.geminiApiKey)
-    headers["x-prism-gemini-api-key"] = credentials.geminiApiKey;
-  if (credentials.awsAccessKeyId) {
-    headers["x-prism-aws-access-key-id"] = credentials.awsAccessKeyId;
-  }
-  if (credentials.awsSecretAccessKey) {
-    headers["x-prism-aws-secret-access-key"] = credentials.awsSecretAccessKey;
-  }
-  if (credentials.awsSessionToken) {
-    headers["x-prism-aws-session-token"] = credentials.awsSessionToken;
-  }
-  if (credentials.awsRegion)
-    headers["x-prism-aws-region"] = credentials.awsRegion;
-  return headers;
-}
-
-function storedCredentials(): Credentials {
-  if (typeof window === "undefined") return defaultCredentials;
-  try {
-    const stored = window.localStorage.getItem("prism.credentials");
-    return stored
-      ? { ...defaultCredentials, ...JSON.parse(stored) }
-      : defaultCredentials;
-  } catch {
-    return defaultCredentials;
-  }
-}
-
 export default function Home() {
-  const apiUrl = useMemo(() => "/api/backend", []);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [models, setModels] = useState<ModelOption[]>([fallbackModel]);
-  const [model, setModel] = useState(fallbackModel.id);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [model, setModel] = useState<string>(fallbackModel.id);
   const [draft, setDraft] = useState("");
-  const [isBusy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-  const [modelStatus, setModelStatus] = useState<string | null>(null);
-  const [showCredentials, setShowCredentials] = useState(false);
-  const [credentials, setCredentials] =
-    useState<Credentials>(storedCredentials);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+  const [modelStatus, setModelStatus] = useState("");
+  const abortRef = useRef<AbortController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    window.localStorage.setItem(
-      "prism.credentials",
-      JSON.stringify(credentials),
-    );
-  }, [credentials]);
 
   const loadConversations = useCallback(async () => {
     try {
-      const response = await fetch(`${apiUrl}/v1/conversations`);
-      if (!response.ok) {
-        setStatus("Unable to load conversations.");
-        return;
-      }
-      const body = (await response.json()) as { conversations: Conversation[] };
-      setConversations(body.conversations);
-      if (!conversationId && body.conversations[0]) {
-        setConversationId(body.conversations[0].id);
-        setModel(body.conversations[0].model_default);
-      }
-    } catch {
-      setStatus(`Chat API is not reachable at ${apiUrl}.`);
+      setConversations(await getConversations());
+    } catch (e) {
+      setStatus(
+        e instanceof Error ? e.message : "failed to load conversations",
+      );
     }
-  }, [apiUrl, conversationId]);
-
-  const loadMessages = useCallback(
-    async (id: string) => {
-      try {
-        const response = await fetch(
-          `${apiUrl}/v1/conversations/${id}/messages`,
-        );
-        if (!response.ok) {
-          setStatus("Unable to load messages.");
-          return;
-        }
-        const body = (await response.json()) as { messages: Message[] };
-        setMessages(body.messages);
-      } catch {
-        setStatus(`Chat API is not reachable at ${apiUrl}.`);
-      }
-    },
-    [apiUrl],
-  );
+  }, []);
 
   const loadModels = useCallback(async () => {
-    setModelStatus("Discovering models...");
     try {
-      const response = await fetch(`${apiUrl}/v1/models`, {
-        headers: credentialHeaders(credentials),
-      });
-      if (!response.ok) throw new Error("Unable to discover models.");
-      const body = (await response.json()) as {
-        models: ModelOption[];
-        discovery_errors: Record<string, string>;
-      };
-      const nextModels = body.models.length ? body.models : [fallbackModel];
-      setModels(nextModels);
+      setModelStatus("Refreshing…");
+      const list = await getModels();
+      setModels(list);
       setModel((current) =>
-        nextModels.some((item) => item.id === current)
-          ? current
-          : nextModels[0].id,
+        list.find((m) => m.id === current) ? current : (list[0]?.id ?? current),
       );
-      const hasFallback = nextModels.some((item) => item.source === "fallback");
-      const errorCount = Object.keys(body.discovery_errors).length;
+      const fallbackCount = list.filter((m) => m.source === "fallback").length;
       setModelStatus(
-        hasFallback || errorCount
-          ? "Using discovered models plus safe fallbacks."
-          : "Model list discovered from active credentials.",
+        fallbackCount === list.length && list.length > 0
+          ? "No live models — add a credential in Settings"
+          : `${list.length} model${list.length === 1 ? "" : "s"} loaded`,
       );
-    } catch (error) {
-      setModels([fallbackModel]);
-      setModel(fallbackModel.id);
-      setModelStatus(
-        error instanceof Error ? error.message : "Using fallback model list.",
-      );
+    } catch (e) {
+      setModelStatus(e instanceof Error ? e.message : "failed to load models");
     }
-  }, [apiUrl, credentials]);
+  }, []);
 
   useEffect(() => {
     void loadConversations();
-  }, [loadConversations]);
-
-  useEffect(() => {
     void loadModels();
-    // Run once at startup; the credentials panel refresh button controls re-discovery.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiUrl]);
+  }, [loadConversations, loadModels]);
 
   useEffect(() => {
-    if (conversationId) void loadMessages(conversationId);
-  }, [conversationId, loadMessages]);
+    function onVis() {
+      if (document.visibilityState === "visible") void loadModels();
+    }
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onVis);
+    };
+  }, [loadModels]);
 
   useEffect(() => {
-    const node = messageListRef.current;
-    if (node) node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+    if (!conversationId) {
+      setMessages([]);
+      return;
+    }
+    void getMessages(conversationId)
+      .then(setMessages)
+      .catch((e) => {
+        setStatus(e instanceof Error ? e.message : "failed to load messages");
+      });
+  }, [conversationId]);
+
+  useEffect(() => {
+    const el = messageListRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
   useEffect(() => {
-    function handleKeyDown(event: globalThis.KeyboardEvent) {
-      const target = event.target as HTMLElement | null;
-      if (["TEXTAREA", "INPUT", "SELECT"].includes(target?.tagName ?? ""))
-        return;
-      const node = messageListRef.current;
-      if (!node) return;
-      if (event.key === "ArrowDown")
-        node.scrollBy({ top: 120, behavior: "smooth" });
-      if (event.key === "ArrowUp")
-        node.scrollBy({ top: -120, behavior: "smooth" });
+    function onEsc(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") abortRef.current?.abort();
     }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
   }, []);
 
-  async function createConversation() {
-    setBusy(true);
-    setStatus(null);
-    try {
-      const response = await fetch(`${apiUrl}/v1/conversations`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model_default: model,
-          system_prompt: "You are a concise, practical assistant.",
-        }),
-      });
-      if (!response.ok) throw new Error("create failed");
-      const body = (await response.json()) as { conversation_id: string };
-      setConversationId(body.conversation_id);
-      setMessages([]);
-      await loadConversations();
-    } catch {
-      setStatus("Unable to create a conversation.");
-    } finally {
-      setBusy(false);
-    }
+  async function startNewChat() {
+    setConversationId(null);
+    setMessages([]);
+    setStatus("");
   }
 
-  async function sendMessage(event: FormEvent<HTMLFormElement>) {
+  async function send(event: FormEvent) {
     event.preventDefault();
     const content = draft.trim();
     if (!content) return;
-
-    let activeConversationId = conversationId;
     setBusy(true);
-    setStatus(null);
-    try {
-      if (!activeConversationId) {
-        const response = await fetch(`${apiUrl}/v1/conversations`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model_default: model,
-            system_prompt: "You are a concise, practical assistant.",
-          }),
-        });
-        if (!response.ok) throw new Error("create failed");
-        const body = (await response.json()) as { conversation_id: string };
-        activeConversationId = body.conversation_id;
-        setConversationId(body.conversation_id);
+    setStatus("");
+    let activeId = conversationId;
+    if (!activeId) {
+      try {
+        activeId = await createConversation(model);
+        setConversationId(activeId);
+      } catch (e) {
+        setStatus(
+          e instanceof Error ? e.message : "failed to create conversation",
+        );
+        setBusy(false);
+        return;
       }
-
-      setDraft("");
-      const draftUserId = `local-user-${Date.now()}`;
-      const draftAssistantId = `local-asst-${Date.now()}`;
-      setMessages((current) => [
-        ...current,
-        {
-          id: draftUserId,
-          role: "user",
-          content,
-          created_at: new Date().toISOString(),
-        },
-        {
-          id: draftAssistantId,
-          role: "assistant",
-          content: "",
-          created_at: new Date().toISOString(),
-          thinking_trace: "",
-        },
-      ]);
-
+    }
+    const now = new Date().toISOString();
+    setMessages((current) => [
+      ...current,
+      {
+        id: `local-user-${Date.now()}`,
+        role: "user",
+        status: "ok",
+        content,
+        created_at: now,
+      },
+    ]);
+    setDraft("");
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
       const response = await fetch(
-        `${apiUrl}/v1/conversations/${activeConversationId}/messages`,
+        `${apiUrl}/v1/conversations/${activeId}/messages`,
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Accept: "text/event-stream",
-            ...credentialHeaders(credentials),
           },
           body: JSON.stringify({ role: "user", content, model }),
+          signal: controller.signal,
         },
       );
       if (!response.ok || !response.body) {
-        const text = await response.text();
-        throw new Error(text || "send failed");
+        setStatus((await response.text()) || "request failed");
+        return;
       }
-
-      let userId = draftUserId;
-      let assistantId = draftAssistantId;
-      let streamError: string | null = null;
-      for await (const { event, data } of readSseStream(response.body)) {
-        if (event === "user_message") {
-          userId = data.id as string;
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === draftUserId
-                ? {
-                    ...message,
-                    id: userId,
-                    created_at: data.created_at as string,
-                  }
-                : message,
-            ),
-          );
-        } else if (event === "assistant_message") {
-          assistantId = data.id as string;
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === draftAssistantId
-                ? {
-                    ...message,
-                    id: assistantId,
-                    created_at: data.created_at as string,
-                  }
-                : message,
-            ),
-          );
-        } else if (event === "thinking") {
-          const delta = (data.delta as string) ?? "";
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === assistantId
-                ? {
-                    ...message,
-                    thinking_trace: `${message.thinking_trace ?? ""}${delta}`,
-                  }
-                : message,
-            ),
-          );
-        } else if (event === "token") {
-          const delta = (data.delta as string) ?? "";
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === assistantId
-                ? { ...message, content: message.content + delta }
-                : message,
-            ),
-          );
-        } else if (event === "error") {
+      for await (const { event: name, data } of readSseStream(response.body)) {
+        if (name === "token") {
+          const delta = String(data.delta ?? "");
+          setMessages((current) => {
+            const next = [...current];
+            const last = next[next.length - 1];
+            if (last?.role === "assistant" && last.status === "pending") {
+              next[next.length - 1] = {
+                ...last,
+                content: last.content + delta,
+              };
+            } else {
+              next.push({
+                id: `local-${Date.now()}`,
+                role: "assistant",
+                status: "pending",
+                content: delta,
+                created_at: new Date().toISOString(),
+              });
+            }
+            return next;
+          });
+        } else if (name === "done") {
+          await getMessages(activeId).then(setMessages);
+        } else if (name === "error") {
           const detail = data.error as { message?: string } | undefined;
-          streamError = detail?.message ?? "stream error";
+          setStatus(detail?.message ?? "stream error");
         }
       }
-      if (streamError) throw new Error(streamError);
+      await getMessages(activeId).then(setMessages);
       await loadConversations();
-    } catch (error) {
-      setStatus(
-        error instanceof Error ? error.message : "Unable to send message.",
-      );
+    } catch (e) {
+      if ((e as Error).name !== "AbortError") {
+        setStatus(e instanceof Error ? e.message : "send failed");
+      }
     } finally {
       setBusy(false);
+      abortRef.current = null;
     }
   }
 
-  function handleDraftKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+  function handleKey(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       event.currentTarget.form?.requestSubmit();
     }
   }
 
-  const selectedModel =
-    models.find((item) => item.id === model) ?? fallbackModel;
+  const selected = models.find((m) => m.id === model) ?? fallbackModel;
   const providerGroups = Array.from(
     models.reduce((groups, item) => {
-      const group = groups.get(item.provider) ?? [];
-      group.push(item);
-      groups.set(item.provider, group);
+      const list = groups.get(item.provider) ?? [];
+      list.push(item);
+      groups.set(item.provider, list);
       return groups;
     }, new Map<string, ModelOption[]>()),
   );
@@ -452,28 +239,26 @@ export default function Home() {
         </div>
         <button
           className="new-chat"
-          disabled={isBusy}
-          onClick={createConversation}
+          disabled={busy}
+          onClick={() => void startNewChat()}
         >
           New chat
         </button>
         <div className="conversation-list">
-          {conversations.map((conversation) => (
+          {conversations.map((c) => (
             <button
+              key={c.id}
               className={`conversation-button ${
-                conversation.id === conversationId ? "active" : ""
+                c.id === conversationId ? "active" : ""
               }`}
-              key={conversation.id}
               onClick={() => {
-                setConversationId(conversation.id);
-                setModel(conversation.model_default);
+                setConversationId(c.id);
+                setModel(c.model_default);
               }}
             >
-              <span className="conversation-model">
-                {conversation.model_default}
-              </span>
+              <span className="conversation-model">{c.model_default}</span>
               <span className="conversation-meta">
-                {conversation.message_count} messages
+                {c.message_count} messages
               </span>
             </button>
           ))}
@@ -485,128 +270,47 @@ export default function Home() {
           <div>
             <h2 className="toolbar-title">Chat</h2>
             <p className="toolbar-subtitle">
-              {selectedModel.provider}
-              {selectedModel.thinking_supported ? " - thinking available" : ""}
+              {selected.provider}
+              {selected.thinking_supported ? " · thinking available" : ""}
+              {selected.source === "fallback" ? " · fallback" : ""}
             </p>
           </div>
           <div className="toolbar-actions">
+            {modelStatus ? (
+              <span className="model-status">{modelStatus}</span>
+            ) : null}
             <button
-              className="ghost-button"
               type="button"
-              onClick={() => setShowCredentials((value) => !value)}
+              className="refresh-button"
+              onClick={() => void loadModels()}
             >
-              Credentials
+              Refresh
             </button>
             <select
               className="model-select"
               value={model}
-              onChange={(event) => setModel(event.target.value)}
+              onChange={(e) => setModel(e.target.value)}
               aria-label="Model"
             >
-              {providerGroups.map(([provider, items]) => (
-                <optgroup key={provider} label={provider}>
-                  {items.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.label}
-                      {item.source === "fallback" ? " (fallback)" : ""}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
+              {providerGroups.length === 0 ? (
+                <option value={fallbackModel.id}>{fallbackModel.label}</option>
+              ) : (
+                providerGroups.map(([provider, items]) => (
+                  <optgroup key={provider} label={provider}>
+                    {items.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.label}
+                        {item.source === "fallback" ? " (fallback)" : ""}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))
+              )}
             </select>
           </div>
         </header>
 
-        {showCredentials ? (
-          <section className="credential-panel">
-            <input
-              value={credentials.openaiApiKey}
-              onChange={(event) =>
-                setCredentials((current) => ({
-                  ...current,
-                  openaiApiKey: event.target.value,
-                }))
-              }
-              placeholder="OpenAI API key"
-              type="password"
-            />
-            <input
-              value={credentials.anthropicApiKey}
-              onChange={(event) =>
-                setCredentials((current) => ({
-                  ...current,
-                  anthropicApiKey: event.target.value,
-                }))
-              }
-              placeholder="Anthropic API key"
-              type="password"
-            />
-            <input
-              value={credentials.geminiApiKey}
-              onChange={(event) =>
-                setCredentials((current) => ({
-                  ...current,
-                  geminiApiKey: event.target.value,
-                }))
-              }
-              placeholder="Gemini API key"
-              type="password"
-            />
-            <input
-              value={credentials.awsRegion}
-              onChange={(event) =>
-                setCredentials((current) => ({
-                  ...current,
-                  awsRegion: event.target.value,
-                }))
-              }
-              placeholder="AWS region"
-            />
-            <input
-              value={credentials.awsAccessKeyId}
-              onChange={(event) =>
-                setCredentials((current) => ({
-                  ...current,
-                  awsAccessKeyId: event.target.value,
-                }))
-              }
-              placeholder="AWS access key id"
-              type="password"
-            />
-            <input
-              value={credentials.awsSecretAccessKey}
-              onChange={(event) =>
-                setCredentials((current) => ({
-                  ...current,
-                  awsSecretAccessKey: event.target.value,
-                }))
-              }
-              placeholder="AWS secret access key"
-              type="password"
-            />
-            <input
-              value={credentials.awsSessionToken}
-              onChange={(event) =>
-                setCredentials((current) => ({
-                  ...current,
-                  awsSessionToken: event.target.value,
-                }))
-              }
-              placeholder="AWS session token"
-              type="password"
-            />
-            <button
-              className="refresh-button"
-              type="button"
-              onClick={loadModels}
-            >
-              Refresh models
-            </button>
-            {modelStatus ? (
-              <span className="model-status">{modelStatus}</span>
-            ) : null}
-          </section>
-        ) : null}
+        <div />
 
         <div className="message-list" ref={messageListRef} tabIndex={0}>
           {messages.length === 0 ? (
@@ -619,36 +323,36 @@ export default function Home() {
             </div>
           ) : (
             messages
-              .filter((message) => message.role !== "system")
-              .map((message) => (
-                <div className={`message ${message.role}`} key={message.id}>
-                  <div className="message-role">{message.role}</div>
-                  {message.thinking_trace ? (
+              .filter((m) => m.role !== "system")
+              .map((m) => (
+                <div className={`message ${m.role}`} key={m.id}>
+                  <div className="message-role">{m.role}</div>
+                  {m.thinking_trace ? (
                     <details className="thinking-trace">
                       <summary>Thinking trace</summary>
-                      <div>{message.thinking_trace}</div>
+                      <div>{m.thinking_trace}</div>
                     </details>
                   ) : null}
-                  <div className="message-content">{message.content}</div>
+                  <div className="message-content">{m.content}</div>
                 </div>
               ))
           )}
           {status ? <div className="status-line">{status}</div> : null}
         </div>
 
-        <form className="composer" onSubmit={sendMessage}>
+        <form className="composer" onSubmit={send}>
           <textarea
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={handleDraftKeyDown}
-            placeholder="Send a message"
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={handleKey}
+            placeholder="Send a message — Enter to send, Shift+Enter for newline"
             aria-label="Message"
           />
           <button
             className="send-button"
-            disabled={isBusy || draft.trim().length === 0}
+            disabled={busy || draft.trim().length === 0}
           >
-            {isBusy ? "Sending" : "Send"}
+            {busy ? "Sending" : "Send"}
           </button>
         </form>
       </section>

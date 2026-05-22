@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { NavBar } from "@/lib/nav";
 
 export const metadata: Metadata = {
   title: "Prism — LLM Chatbot",
@@ -13,7 +14,12 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <div className="root-shell">
+          <NavBar />
+          {children}
+        </div>
+      </body>
     </html>
   );
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from dataclasses import replace
@@ -50,12 +51,14 @@ class FakeChatStore:
         conversation_id: str,
         role: Literal["user", "assistant", "system"],
         content: str,
+        status: str = "ok",
         metadata: dict[str, Any] | None = None,
     ) -> Message:
         message = Message(
             id=str(uuid.uuid4()),
             conversation_id=conversation_id,
             role=role,
+            status=status,
             content=content,
             created_at=datetime.now(UTC),
             metadata=metadata or {},
@@ -67,6 +70,7 @@ class FakeChatStore:
         self,
         message_id: str,
         content: str,
+        status: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Message:
         for index, message in enumerate(self.messages):
@@ -74,6 +78,7 @@ class FakeChatStore:
                 updated = replace(
                     message,
                     content=content,
+                    status=status if status is not None else message.status,
                     metadata=metadata if metadata is not None else message.metadata,
                 )
                 self.messages[index] = updated
@@ -90,7 +95,7 @@ class FakePrismClient:
 
 
 class FakeAgent:
-    def __init__(self, chunks: list[dict[str, Any]], exc: Exception | None = None) -> None:
+    def __init__(self, chunks: list[dict[str, Any]], exc: BaseException | None = None) -> None:
         self.chunks = chunks
         self.exc = exc
 
@@ -122,6 +127,26 @@ def chatbot_client(monkeypatch):
     store = FakeChatStore()
     app.state.chat_store = store
     app.state.prism_client = FakePrismClient()
+
+    class FakeCredentialStore:
+        def get_default_credential_for_provider(self, provider: str):
+            return type(
+                "Cred",
+                (),
+                {
+                    "provider": provider,
+                    "secrets": {"api_key": "test"},
+                    "metadata": {},
+                },
+            )()
+
+        def list_credentials(self):
+            return []
+
+        def get_credential_with_secrets(self, credential_id: str):
+            return None
+
+    app.state.credential_store = FakeCredentialStore()
 
     chunks = [
         {"data": "he"},
@@ -165,6 +190,7 @@ def test_chatbot_streams_assistant_tokens_via_sse(chatbot_client) -> None:
     messages = client.get(f"/v1/conversations/{conversation_id}/messages").json()["messages"]
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assert messages[1]["content"] == "hello"
+    assert messages[1]["status"] == "ok"
 
 
 def test_chatbot_streams_and_persists_thinking_traces(monkeypatch) -> None:
@@ -241,10 +267,19 @@ def test_chatbot_leaves_explicit_bedrock_converse_models_unchanged(chatbot_clien
     assert captured["kwargs"]["prism_metadata"]["prism"]["provider"] == "bedrock"
 
 
-def test_chatbot_does_not_persist_assistant_row_on_stream_failure(monkeypatch) -> None:
+def test_chatbot_marks_assistant_error_on_stream_failure(monkeypatch) -> None:
     store = FakeChatStore()
     app.state.chat_store = store
     app.state.prism_client = FakePrismClient()
+    app.state.credential_store = type(
+        "CredStore",
+        (),
+        {
+            "get_default_credential_for_provider": lambda self, _: type(
+                "Cred", (), {"provider": "openai", "secrets": {"api_key": "k"}, "metadata": {}}
+            )()
+        },
+    )()
 
     def fake_build_agent(**kwargs):
         return FakeAgent([{"data": "partial"}], RuntimeError("provider blew up"))
@@ -266,13 +301,23 @@ def test_chatbot_does_not_persist_assistant_row_on_stream_failure(monkeypatch) -
     assert "done" not in event_names
 
     messages = client.get(f"/v1/conversations/{conversation_id}/messages").json()["messages"]
-    assert [message["role"] for message in messages] == ["user"]
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[1]["status"] == "error"
 
 
-def test_chatbot_does_not_persist_assistant_row_on_empty_response(monkeypatch) -> None:
+def test_chatbot_marks_assistant_error_on_empty_response(monkeypatch) -> None:
     store = FakeChatStore()
     app.state.chat_store = store
     app.state.prism_client = FakePrismClient()
+    app.state.credential_store = type(
+        "CredStore",
+        (),
+        {
+            "get_default_credential_for_provider": lambda self, _: type(
+                "Cred", (), {"provider": "openai", "secrets": {"api_key": "k"}, "metadata": {}}
+            )()
+        },
+    )()
 
     def fake_build_agent(**kwargs):
         return FakeAgent([])
@@ -290,4 +335,59 @@ def test_chatbot_does_not_persist_assistant_row_on_empty_response(monkeypatch) -
     events = _parse_sse(response.text)
     assert any(event == "error" for event, _ in events)
     messages = client.get(f"/v1/conversations/{conversation_id}/messages").json()["messages"]
-    assert [message["role"] for message in messages] == ["user"]
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[1]["status"] == "error"
+
+
+def test_chatbot_returns_no_credential_without_creating_rows(monkeypatch) -> None:
+    store = FakeChatStore()
+    app.state.chat_store = store
+    app.state.prism_client = FakePrismClient()
+    app.state.credential_store = type(
+        "CredStore", (), {"get_default_credential_for_provider": lambda self, _: None}
+    )()
+    monkeypatch.setattr(chatbot_main, "_build_agent", lambda **_: FakeAgent([{"data": "x"}]))
+    client = TestClient(app)
+
+    created = client.post("/v1/conversations", json={"model_default": "gpt-4o"})
+    conversation_id = created.json()["conversation_id"]
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        json={"role": "user", "content": "hi", "model": "gpt-4o"},
+    )
+    assert response.status_code == 400
+    assert response.json() == {"error": "no_credential", "provider": "openai"}
+    messages = client.get(f"/v1/conversations/{conversation_id}/messages").json()["messages"]
+    assert messages == []
+
+
+def test_chatbot_persists_partial_on_cancelled_error(monkeypatch) -> None:
+    store = FakeChatStore()
+    app.state.chat_store = store
+    app.state.prism_client = FakePrismClient()
+    app.state.credential_store = type(
+        "CredStore",
+        (),
+        {
+            "get_default_credential_for_provider": lambda self, _: type(
+                "Cred",
+                (),
+                {"provider": "openai", "secrets": {"api_key": "k"}, "metadata": {}},
+            )()
+        },
+    )()
+
+    def fake_build_agent(**kwargs):
+        return FakeAgent([{"data": "partial"}], asyncio.CancelledError())
+
+    monkeypatch.setattr(chatbot_main, "_build_agent", fake_build_agent)
+    client = TestClient(app)
+    created = client.post("/v1/conversations", json={"model_default": "gpt-4o"})
+    conversation_id = created.json()["conversation_id"]
+    client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        json={"role": "user", "content": "hi", "model": "gpt-4o"},
+    )
+    messages = client.get(f"/v1/conversations/{conversation_id}/messages").json()["messages"]
+    assert messages[1]["status"] == "cancelled"
+    assert messages[1]["content"] == "partial"
