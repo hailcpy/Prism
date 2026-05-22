@@ -279,6 +279,48 @@ def test_callback_skips_calls_without_prism_metadata() -> None:
     assert client.captured == []
 
 
+def test_callback_captures_cost_and_token_breakdown() -> None:
+    client = _CapturingClient()
+    cb = prism_sdk.PrismCallback(client)
+
+    start = datetime(2026, 5, 22, 10, 0, 0, tzinfo=UTC)
+    end = start + timedelta(milliseconds=10)
+    response = {
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 40},
+            "completion_tokens_details": {"reasoning_tokens": 8},
+        },
+    }
+    kwargs = _kwargs(prism_sdk.metadata(conversation_id="c", message_id="m"))
+    kwargs["response_cost"] = 0.00123
+
+    cb.log_success_event(kwargs, response, start, end)
+
+    event = client.captured[0]
+    assert event["cost_usd"] == 0.00123
+    assert event["usage"]["cached_prompt_tokens"] == 40
+    assert event["usage"]["reasoning_tokens"] == 8
+
+
+def test_callback_falls_back_to_completion_cost(monkeypatch) -> None:
+    client = _CapturingClient()
+    cb = prism_sdk.PrismCallback(client)
+    monkeypatch.setattr(prism_sdk.litellm, "completion_cost", lambda **_: 0.0042)
+
+    start = datetime(2026, 5, 22, 10, 0, 0, tzinfo=UTC)
+    end = start + timedelta(milliseconds=10)
+    response = {"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1}}
+    kwargs = _kwargs(prism_sdk.metadata(conversation_id="c", message_id="m"))
+
+    cb.log_success_event(kwargs, response, start, end)
+
+    assert client.captured[0]["cost_usd"] == 0.0042
+
+
 def test_async_callback_delegates_to_sync_path() -> None:
     client = _CapturingClient()
     captured = client.captured

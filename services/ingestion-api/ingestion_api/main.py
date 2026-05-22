@@ -41,6 +41,8 @@ class UsageBody(BaseModel):
     prompt_tokens: int | None = Field(default=None, ge=0)
     completion_tokens: int | None = Field(default=None, ge=0)
     total_tokens: int | None = Field(default=None, ge=0)
+    cached_prompt_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
 
 
 class EventBody(BaseModel):
@@ -59,6 +61,7 @@ class EventBody(BaseModel):
     latency_ms: int = Field(ge=0)
     ttft_ms: int | None = Field(default=None, ge=0)
     usage: UsageBody = Field(default_factory=UsageBody)
+    cost_usd: float | None = Field(default=None, ge=0)
     prompt_preview: str | None = Field(default=None, max_length=500)
     response_preview: str | None = Field(default=None, max_length=500)
     raw_payload: dict[str, Any] | list[Any] | None = None
@@ -208,7 +211,10 @@ def _sanitize_event(
             prompt_tokens=body.usage.prompt_tokens,
             completion_tokens=body.usage.completion_tokens,
             total_tokens=body.usage.total_tokens,
+            cached_prompt_tokens=body.usage.cached_prompt_tokens,
+            reasoning_tokens=body.usage.reasoning_tokens,
         ),
+        cost_usd=body.cost_usd,
         prompt_preview=redactor.redact_text(body.prompt_preview),
         response_preview=redactor.redact_text(body.response_preview),
         raw_payload_uri=raw_payload_uri,

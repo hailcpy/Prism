@@ -271,3 +271,77 @@ def test_metrics_endpoint_log_store_helper_caches() -> None:
 def test_metrics_query_unused_logs_query() -> None:
     # quick sanity: LogsQuery type still importable in tests context.
     assert LogsQuery is not None
+
+
+def test_conversation_cost_endpoint_aggregates_inference_logs(monkeypatch) -> None:
+    from chatbot_api.main import _get_store
+    from prism_infra.models import Usage
+
+    bucket = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    log_store = InMemoryLogStore()
+    log_store.write_logs_batch(
+        [
+            InferenceEvent(
+                schema_version="1.0",
+                inference_id="00000000-0000-7000-8000-000000000001",
+                conversation_id="conv-1",
+                message_id=None,
+                model="gpt-4o",
+                provider="openai",
+                status="ok",
+                ts_start=bucket,
+                ts_end=bucket + timedelta(milliseconds=100),
+                latency_ms=100,
+                usage=Usage(
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    total_tokens=15,
+                    cached_prompt_tokens=2,
+                    reasoning_tokens=1,
+                ),
+                cost_usd=0.001,
+                created_at=bucket,
+            ),
+            InferenceEvent(
+                schema_version="1.0",
+                inference_id="00000000-0000-7000-8000-000000000002",
+                conversation_id="conv-1",
+                message_id=None,
+                model="gpt-4o",
+                provider="openai",
+                status="ok",
+                ts_start=bucket,
+                ts_end=bucket + timedelta(milliseconds=100),
+                latency_ms=100,
+                usage=Usage(prompt_tokens=20, completion_tokens=10, total_tokens=30),
+                cost_usd=0.003,
+                created_at=bucket,
+            ),
+        ]
+    )
+
+    class FakeStore:
+        def get_conversation(self, conversation_id: str) -> Any:
+            return object() if conversation_id == "conv-1" else None
+
+    app.state.log_store = log_store
+    app.state.chat_store = FakeStore()
+    try:
+        client = TestClient(app)
+        response = client.get("/v1/conversations/conv-1/cost")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["calls"] == 2
+        assert body["prompt_tokens"] == 30
+        assert body["completion_tokens"] == 15
+        assert body["cached_prompt_tokens"] == 2
+        assert body["reasoning_tokens"] == 1
+        assert body["cost_usd"] == pytest.approx(0.004)
+
+        missing = client.get("/v1/conversations/conv-x/cost")
+        assert missing.status_code == 404
+
+        assert _get_store(app) is app.state.chat_store
+    finally:
+        app.state.log_store = None
+        app.state.chat_store = None

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from prism_infra.models import (
+    ConversationCost,
     InferenceEvent,
     LogsQuery,
     MetricsQuery,
@@ -70,6 +71,18 @@ class InMemoryLogStore:
         self.upsert_metrics(rows)
         return len(rows)
 
+    def get_conversation_cost(self, conversation_id: str) -> ConversationCost:
+        matches = [e for e in self.logs if e.conversation_id == conversation_id]
+        return ConversationCost(
+            conversation_id=conversation_id,
+            calls=len(matches),
+            prompt_tokens=sum(e.usage.prompt_tokens or 0 for e in matches),
+            completion_tokens=sum(e.usage.completion_tokens or 0 for e in matches),
+            cached_prompt_tokens=sum(e.usage.cached_prompt_tokens or 0 for e in matches),
+            reasoning_tokens=sum(e.usage.reasoning_tokens or 0 for e in matches),
+            cost_usd=sum(e.cost_usd or 0.0 for e in matches),
+        )
+
     def get_logs(self, query: LogsQuery) -> list[InferenceEvent]:
         rows = [
             event
@@ -105,6 +118,7 @@ def _build_metrics_row(
         latency_p95_ms=pct(0.95),
         prompt_tokens_sum=sum(e.usage.prompt_tokens or 0 for e in events),
         completion_tokens_sum=sum(e.usage.completion_tokens or 0 for e in events),
+        cost_usd_sum=sum(e.cost_usd or 0.0 for e in events),
     )
 
 

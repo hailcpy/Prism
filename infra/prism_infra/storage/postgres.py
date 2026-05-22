@@ -9,6 +9,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from prism_infra.models import (
+    ConversationCost,
     ErrorInfo,
     InferenceEvent,
     LogsQuery,
@@ -54,7 +55,8 @@ class PostgresLogStore:
                   id, created_at, ts_start, ts_end, conversation_id, message_id,
                   model, provider, status, error_type, error_message,
                   provider_error_code, latency_ms, ttft_ms, prompt_tokens,
-                  completion_tokens, total_tokens, prompt_preview,
+                  completion_tokens, total_tokens, cached_prompt_tokens,
+                  reasoning_tokens, cost_usd, prompt_preview,
                   response_preview, raw_payload_uri, raw_payload_jsonb,
                   metadata_jsonb, sdk_version, schema_version
                 )
@@ -64,6 +66,7 @@ class PostgresLogStore:
                   %(status)s, %(error_type)s, %(error_message)s,
                   %(provider_error_code)s, %(latency_ms)s, %(ttft_ms)s,
                   %(prompt_tokens)s, %(completion_tokens)s, %(total_tokens)s,
+                  %(cached_prompt_tokens)s, %(reasoning_tokens)s, %(cost_usd)s,
                   %(prompt_preview)s, %(response_preview)s, %(raw_payload_uri)s,
                   %(raw_payload_jsonb)s, %(metadata_jsonb)s, %(sdk_version)s,
                   %(schema_version)s
@@ -131,12 +134,13 @@ class PostgresLogStore:
                 INSERT INTO metrics_minute (
                   minute_bucket, model, provider, count, error_count,
                   latency_p50_ms, latency_p95_ms, prompt_tokens_sum,
-                  completion_tokens_sum
+                  completion_tokens_sum, cost_usd_sum
                 )
                 VALUES (
                   %(minute_bucket)s, %(model)s, %(provider)s, %(count)s,
                   %(error_count)s, %(latency_p50_ms)s, %(latency_p95_ms)s,
-                  %(prompt_tokens_sum)s, %(completion_tokens_sum)s
+                  %(prompt_tokens_sum)s, %(completion_tokens_sum)s,
+                  %(cost_usd_sum)s
                 )
                 ON CONFLICT (minute_bucket, model, provider) DO UPDATE SET
                   count = EXCLUDED.count,
@@ -144,7 +148,8 @@ class PostgresLogStore:
                   latency_p50_ms = EXCLUDED.latency_p50_ms,
                   latency_p95_ms = EXCLUDED.latency_p95_ms,
                   prompt_tokens_sum = EXCLUDED.prompt_tokens_sum,
-                  completion_tokens_sum = EXCLUDED.completion_tokens_sum
+                  completion_tokens_sum = EXCLUDED.completion_tokens_sum,
+                  cost_usd_sum = EXCLUDED.cost_usd_sum
                 """,
                 [row.__dict__ for row in rows],
             )
@@ -153,7 +158,7 @@ class PostgresLogStore:
         sql = """
             SELECT minute_bucket, model, provider, count, error_count,
                    latency_p50_ms, latency_p95_ms, prompt_tokens_sum,
-                   completion_tokens_sum
+                   completion_tokens_sum, cost_usd_sum
             FROM metrics_minute
             WHERE minute_bucket >= %(start)s AND minute_bucket < %(end)s
         """
@@ -175,7 +180,8 @@ class PostgresLogStore:
             SELECT id, created_at, ts_start, ts_end, conversation_id, message_id,
                    model, provider, status, error_type, error_message,
                    provider_error_code, latency_ms, ttft_ms, prompt_tokens,
-                   completion_tokens, total_tokens, prompt_preview,
+                   completion_tokens, total_tokens, cached_prompt_tokens,
+                   reasoning_tokens, cost_usd, prompt_preview,
                    response_preview, raw_payload_uri, raw_payload_jsonb,
                    metadata_jsonb, sdk_version, schema_version
             FROM inference_logs
@@ -197,6 +203,33 @@ class PostgresLogStore:
             cur.execute(sql, params)
             return [self._row_to_event(row) for row in cur.fetchall()]
 
+    def get_conversation_cost(self, conversation_id: str) -> ConversationCost:
+        with psycopg.connect(self.database_url) as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT
+                  COUNT(*)::int AS calls,
+                  COALESCE(SUM(prompt_tokens), 0)::bigint AS prompt_tokens,
+                  COALESCE(SUM(completion_tokens), 0)::bigint AS completion_tokens,
+                  COALESCE(SUM(cached_prompt_tokens), 0)::bigint AS cached_prompt_tokens,
+                  COALESCE(SUM(reasoning_tokens), 0)::bigint AS reasoning_tokens,
+                  COALESCE(SUM(cost_usd), 0)::double precision AS cost_usd
+                FROM inference_logs
+                WHERE conversation_id = %s
+                """,
+                (conversation_id,),
+            )
+            row = cur.fetchone() or {}
+            return ConversationCost(
+                conversation_id=conversation_id,
+                calls=int(row.get("calls", 0)),
+                prompt_tokens=int(row.get("prompt_tokens", 0)),
+                completion_tokens=int(row.get("completion_tokens", 0)),
+                cached_prompt_tokens=int(row.get("cached_prompt_tokens", 0)),
+                reasoning_tokens=int(row.get("reasoning_tokens", 0)),
+                cost_usd=float(row.get("cost_usd", 0.0)),
+            )
+
     def reconcile_metrics(self, start: datetime, end: datetime) -> int:
         """Recompute metrics_minute over [start, end) from inference_logs.
 
@@ -209,7 +242,7 @@ class PostgresLogStore:
                 INSERT INTO metrics_minute (
                   minute_bucket, model, provider, count, error_count,
                   latency_p50_ms, latency_p95_ms, prompt_tokens_sum,
-                  completion_tokens_sum
+                  completion_tokens_sum, cost_usd_sum
                 )
                 SELECT
                   date_trunc('minute', created_at) AS minute_bucket,
@@ -222,7 +255,8 @@ class PostgresLogStore:
                   COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::int
                     AS latency_p95_ms,
                   COALESCE(sum(prompt_tokens), 0)::bigint AS prompt_tokens_sum,
-                  COALESCE(sum(completion_tokens), 0)::bigint AS completion_tokens_sum
+                  COALESCE(sum(completion_tokens), 0)::bigint AS completion_tokens_sum,
+                  COALESCE(sum(cost_usd), 0)::double precision AS cost_usd_sum
                 FROM inference_logs
                 WHERE created_at >= %(start)s AND created_at < %(end)s
                 GROUP BY 1, 2, 3
@@ -232,7 +266,8 @@ class PostgresLogStore:
                   latency_p50_ms = EXCLUDED.latency_p50_ms,
                   latency_p95_ms = EXCLUDED.latency_p95_ms,
                   prompt_tokens_sum = EXCLUDED.prompt_tokens_sum,
-                  completion_tokens_sum = EXCLUDED.completion_tokens_sum
+                  completion_tokens_sum = EXCLUDED.completion_tokens_sum,
+                  cost_usd_sum = EXCLUDED.cost_usd_sum
                 """,
                 {"start": start, "end": end},
             )
@@ -298,6 +333,9 @@ class PostgresLogStore:
             "prompt_tokens": event.usage.prompt_tokens,
             "completion_tokens": event.usage.completion_tokens,
             "total_tokens": event.usage.total_tokens,
+            "cached_prompt_tokens": event.usage.cached_prompt_tokens,
+            "reasoning_tokens": event.usage.reasoning_tokens,
+            "cost_usd": event.cost_usd,
             "prompt_preview": event.prompt_preview,
             "response_preview": event.response_preview,
             "raw_payload_uri": event.raw_payload_uri,
@@ -355,7 +393,10 @@ class PostgresLogStore:
                 prompt_tokens=row["prompt_tokens"],
                 completion_tokens=row["completion_tokens"],
                 total_tokens=row["total_tokens"],
+                cached_prompt_tokens=row["cached_prompt_tokens"],
+                reasoning_tokens=row["reasoning_tokens"],
             ),
+            cost_usd=row["cost_usd"],
             prompt_preview=row["prompt_preview"],
             response_preview=row["response_preview"],
             raw_payload_uri=row["raw_payload_uri"],

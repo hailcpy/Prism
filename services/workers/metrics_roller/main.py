@@ -37,6 +37,7 @@ class _WindowBucket:
     errors: int = 0
     prompt_tokens_sum: int = 0
     completion_tokens_sum: int = 0
+    cost_usd_sum: float = 0.0
 
     def add(self, event: InferenceEvent) -> None:
         bisect.insort(self.latencies, event.latency_ms)
@@ -46,6 +47,8 @@ class _WindowBucket:
             self.prompt_tokens_sum += event.usage.prompt_tokens
         if event.usage.completion_tokens:
             self.completion_tokens_sum += event.usage.completion_tokens
+        if event.cost_usd:
+            self.cost_usd_sum += event.cost_usd
 
     def to_row(self) -> MetricsRow:
         return MetricsRow(
@@ -58,6 +61,7 @@ class _WindowBucket:
             latency_p95_ms=_percentile(self.latencies, 0.95),
             prompt_tokens_sum=self.prompt_tokens_sum,
             completion_tokens_sum=self.completion_tokens_sum,
+            cost_usd_sum=self.cost_usd_sum,
         )
 
 

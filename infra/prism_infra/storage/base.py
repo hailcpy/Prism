@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from prism_infra.models import (
+    ConversationCost,
     InferenceEvent,
     LogsQuery,
     MetricsQuery,
@@ -24,6 +25,8 @@ class LogStore(Protocol):
     def get_logs(self, query: LogsQuery) -> list[InferenceEvent]: ...
 
     def reconcile_metrics(self, start: datetime, end: datetime) -> int: ...
+
+    def get_conversation_cost(self, conversation_id: str) -> ConversationCost: ...
 
 
 class RawPayloadStore(Protocol):

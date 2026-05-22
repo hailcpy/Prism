@@ -46,6 +46,9 @@ CREATE TABLE inference_logs (
   prompt_tokens INT CHECK (prompt_tokens IS NULL OR prompt_tokens >= 0),
   completion_tokens INT CHECK (completion_tokens IS NULL OR completion_tokens >= 0),
   total_tokens INT CHECK (total_tokens IS NULL OR total_tokens >= 0),
+  cached_prompt_tokens INT CHECK (cached_prompt_tokens IS NULL OR cached_prompt_tokens >= 0),
+  reasoning_tokens INT CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),
+  cost_usd DOUBLE PRECISION CHECK (cost_usd IS NULL OR cost_usd >= 0),
   prompt_preview TEXT,
   response_preview TEXT,
   raw_payload_uri TEXT,
@@ -103,6 +106,7 @@ CREATE TABLE metrics_minute (
   latency_p95_ms INT NOT NULL,
   prompt_tokens_sum BIGINT NOT NULL,
   completion_tokens_sum BIGINT NOT NULL,
+  cost_usd_sum DOUBLE PRECISION NOT NULL DEFAULT 0,
   PRIMARY KEY (minute_bucket, model, provider)
 );
 

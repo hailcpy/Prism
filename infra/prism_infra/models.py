@@ -20,6 +20,8 @@ class Usage:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+    cached_prompt_tokens: int | None = None
+    reasoning_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,7 @@ class InferenceEvent:
     response_preview: str | None = None
     raw_payload_uri: str | None = None
     raw_payload_jsonb: dict[str, Any] | list[Any] | None = None
+    cost_usd: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     sdk_version: str | None = None
     created_at: datetime | None = None
@@ -82,6 +85,7 @@ class MetricsRow:
     latency_p95_ms: int
     prompt_tokens_sum: int
     completion_tokens_sum: int
+    cost_usd_sum: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -90,6 +94,17 @@ class MetricsQuery:
     end: datetime
     models: tuple[str, ...] = ()
     providers: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ConversationCost:
+    conversation_id: str
+    calls: int
+    prompt_tokens: int
+    completion_tokens: int
+    cached_prompt_tokens: int
+    reasoning_tokens: int
+    cost_usd: float
 
 
 @dataclass(frozen=True)

@@ -265,6 +265,8 @@ def _build_event(
     messages = kwargs.get("messages") or []
     inference_id = prism_meta.get("inference_id") or str(uuid.uuid4())
 
+    usage = _response_usage(response_obj)
+    cost_usd = _response_cost(kwargs, response_obj, model, usage)
     return {
         "schema_version": "1.0",
         "inference_id": inference_id,
@@ -278,7 +280,8 @@ def _build_event(
         "ts_end": _iso(_ensure_utc(end_time)),
         "latency_ms": _ms_between(start_time, end_time),
         "ttft_ms": ttft_ms,
-        "usage": _response_usage(response_obj),
+        "usage": usage,
+        "cost_usd": cost_usd,
         "prompt_preview": _prompt_preview(messages),
         "response_preview": _response_preview(response_obj),
         "raw_payload": None,
@@ -333,11 +336,50 @@ def _response_preview(response_obj: Any) -> str | None:
 
 def _response_usage(response_obj: Any) -> dict[str, int | None]:
     usage = _get(response_obj, "usage", None) or {}
+    prompt_details = _get(usage, "prompt_tokens_details", None) or {}
+    completion_details = _get(usage, "completion_tokens_details", None) or {}
+    cached = _get(prompt_details, "cached_tokens", None)
+    if cached is None:
+        cached = _get(usage, "cache_read_input_tokens", None)
+    reasoning = _get(completion_details, "reasoning_tokens", None)
     return {
         "prompt_tokens": _get(usage, "prompt_tokens", None),
         "completion_tokens": _get(usage, "completion_tokens", None),
         "total_tokens": _get(usage, "total_tokens", None),
+        "cached_prompt_tokens": cached,
+        "reasoning_tokens": reasoning,
     }
+
+
+def _response_cost(
+    kwargs: Mapping[str, Any],
+    response_obj: Any,
+    model: str,
+    usage: Mapping[str, int | None],
+) -> float | None:
+    cost = kwargs.get("response_cost")
+    if isinstance(cost, (int, float)) and cost >= 0:
+        return float(cost)
+    if response_obj is not None:
+        try:
+            computed = litellm.completion_cost(completion_response=response_obj)
+        except Exception:  # noqa: BLE001 - cost calc is best-effort
+            computed = None
+        if isinstance(computed, (int, float)) and computed >= 0:
+            return float(computed)
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    if prompt_tokens is None and completion_tokens is None:
+        return None
+    try:
+        prompt_cost, completion_cost = litellm.cost_per_token(
+            model=model,
+            prompt_tokens=prompt_tokens or 0,
+            completion_tokens=completion_tokens or 0,
+        )
+    except Exception:  # noqa: BLE001 - unknown model (e.g. opaque Bedrock ARN)
+        return None
+    return float(prompt_cost) + float(completion_cost)
 
 
 def _provider_from_context(

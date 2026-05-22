@@ -840,10 +840,21 @@ class MetricsBucket(BaseModel):
     latency_p95_ms: int
     prompt_tokens_sum: int
     completion_tokens_sum: int
+    cost_usd_sum: float = 0.0
 
 
 class MetricsResponse(BaseModel):
     buckets: list[MetricsBucket]
+
+
+class ConversationCostResponse(BaseModel):
+    conversation_id: str
+    calls: int
+    prompt_tokens: int
+    completion_tokens: int
+    cached_prompt_tokens: int
+    reasoning_tokens: int
+    cost_usd: float
 
 
 @app.get("/v1/metrics", response_model=MetricsResponse)
@@ -883,9 +894,30 @@ def get_metrics(
                 latency_p95_ms=row.latency_p95_ms,
                 prompt_tokens_sum=row.prompt_tokens_sum,
                 completion_tokens_sum=row.completion_tokens_sum,
+                cost_usd_sum=row.cost_usd_sum,
             )
             for row in rows
         ]
+    )
+
+
+@app.get(
+    "/v1/conversations/{conversation_id}/cost",
+    response_model=ConversationCostResponse,
+)
+def get_conversation_cost(request: Request, conversation_id: str) -> ConversationCostResponse:
+    store = _get_store(request.app)
+    if store.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    cost = _get_log_store(request.app).get_conversation_cost(conversation_id)
+    return ConversationCostResponse(
+        conversation_id=cost.conversation_id,
+        calls=cost.calls,
+        prompt_tokens=cost.prompt_tokens,
+        completion_tokens=cost.completion_tokens,
+        cached_prompt_tokens=cost.cached_prompt_tokens,
+        reasoning_tokens=cost.reasoning_tokens,
+        cost_usd=cost.cost_usd,
     )
 
 
