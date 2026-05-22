@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 
 type Bucket = {
   minute_bucket: string;
@@ -129,13 +130,31 @@ export default function MetricsPage() {
   );
 
   return (
-    <main className="metrics-shell">
-      <header className="metrics-header">
-        <h1>Prism — Dashboard</h1>
-        <div className="metrics-controls">
-          <label>
-            Range
+    <main className="max-w-6xl mx-auto p-4 md:p-8 space-y-8 min-h-[calc(100vh-56px)] bg-mesh-light dark:bg-mesh-dark text-zinc-900 dark:text-zinc-100">
+      <header className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-8 border-b border-black/10 dark:border-white/10 pb-6">
+        <div>
+          <div className="flex items-center gap-4 text-sm font-semibold mb-4">
+            <Link href="/" className="text-[#009f8f] hover:text-[#0b6b75] dark:text-[#ff6d4d] dark:hover:text-[#ff8f75] transition-colors">← Chat</Link>
+          </div>
+          <h1 className="text-3xl font-bold mb-1">Prism — Metrics</h1>
+          <div className="text-sm text-zinc-500 dark:text-zinc-400 font-medium">
+            {error ? (
+              <span className="text-red-500">Error: {error}</span>
+            ) : loadedAt ? (
+              <span>
+                Updated {loadedAt.toLocaleTimeString()} — auto refresh 15s
+              </span>
+            ) : (
+              <span>Loading…</span>
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-end gap-4 bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md p-4 rounded-xl border border-black/5 dark:border-white/5 shadow-sm">
+          <label className="flex flex-col gap-1.5 text-xs font-semibold text-zinc-600 dark:text-zinc-400">
+            RANGE
             <select
+              className="px-3 py-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#009f8f]/30 min-w-[140px] text-zinc-900 dark:text-zinc-100"
               value={rangeMinutes}
               onChange={(e) => setRangeMinutes(Number(e.target.value))}
             >
@@ -146,9 +165,10 @@ export default function MetricsPage() {
               ))}
             </select>
           </label>
-          <label>
-            Model
+          <label className="flex flex-col gap-1.5 text-xs font-semibold text-zinc-600 dark:text-zinc-400">
+            MODEL
             <select
+              className="px-3 py-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#009f8f]/30 min-w-[140px] text-zinc-900 dark:text-zinc-100"
               value={modelFilter}
               onChange={(e) => setModelFilter(e.target.value)}
             >
@@ -160,9 +180,10 @@ export default function MetricsPage() {
               ))}
             </select>
           </label>
-          <label>
-            Provider
+          <label className="flex flex-col gap-1.5 text-xs font-semibold text-zinc-600 dark:text-zinc-400">
+            PROVIDER
             <select
+              className="px-3 py-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#009f8f]/30 min-w-[140px] text-zinc-900 dark:text-zinc-100"
               value={providerFilter}
               onChange={(e) => setProviderFilter(e.target.value)}
             >
@@ -174,24 +195,17 @@ export default function MetricsPage() {
               ))}
             </select>
           </label>
-          <button type="button" onClick={() => void load()}>
+          <button 
+            type="button" 
+            onClick={() => void load()}
+            className="px-4 py-1.5 h-[34px] rounded-lg bg-zinc-200 dark:bg-zinc-700 text-sm font-semibold hover:bg-zinc-300 dark:hover:bg-zinc-600 transition-colors"
+          >
             Refresh
           </button>
         </div>
-        <div className="metrics-status">
-          {error ? (
-            <span className="metrics-error">Error: {error}</span>
-          ) : loadedAt ? (
-            <span>
-              Updated {loadedAt.toLocaleTimeString()} — auto refresh 15s
-            </span>
-          ) : (
-            <span>Loading…</span>
-          )}
-        </div>
       </header>
 
-      <section className="metrics-summary">
+      <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <SummaryCard label="Calls" value={totals.count.toLocaleString()} />
         <SummaryCard label="Errors" value={totals.errors.toLocaleString()} />
         <SummaryCard
@@ -208,7 +222,7 @@ export default function MetricsPage() {
         />
       </section>
 
-      <section className="metrics-grid">
+      <section className="grid md:grid-cols-2 gap-6">
         <Chart
           title="Latency p50 (ms)"
           series={buildSeries((b) => b.latency_p50_ms)}
@@ -245,9 +259,9 @@ export default function MetricsPage() {
 
 function SummaryCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="metrics-card">
-      <div className="metrics-card-label">{label}</div>
-      <div className="metrics-card-value">{value}</div>
+    <div className="bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md p-5 rounded-2xl border border-black/5 dark:border-white/5 shadow-sm text-center">
+      <div className="text-[11px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2">{label}</div>
+      <div className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">{value}</div>
     </div>
   );
 }
@@ -286,16 +300,15 @@ function Chart({
     padding.top + innerH - ((y - yMin) / (yMax - yMin)) * innerH;
 
   return (
-    <div className="metrics-chart">
-      <h2>{title}</h2>
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title}>
+    <div className="bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md p-6 rounded-2xl border border-black/5 dark:border-white/5 shadow-sm flex flex-col">
+      <h2 className="text-sm font-bold mb-4">{title}</h2>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title} className="w-full h-auto drop-shadow-sm">
         <rect
           x={padding.left}
           y={padding.top}
           width={innerW}
           height={innerH}
-          fill="#ffffff"
-          stroke="#d9e2e5"
+          fill="transparent"
         />
         {[0, 0.25, 0.5, 0.75, 1].map((t) => {
           const yVal = yMin + (yMax - yMin) * (1 - t);
@@ -307,14 +320,14 @@ function Chart({
                 x2={padding.left + innerW}
                 y1={yPx}
                 y2={yPx}
-                stroke="#eef2f3"
+                className="stroke-zinc-200 dark:stroke-zinc-800"
               />
               <text
                 x={padding.left - 6}
                 y={yPx + 4}
                 textAnchor="end"
                 fontSize="10"
-                fill="#647176"
+                className="fill-zinc-500"
               >
                 {formatNumber(yVal)}
               </text>
@@ -323,14 +336,14 @@ function Chart({
         })}
         {!empty && (
           <>
-            <text x={padding.left} y={height - 8} fontSize="10" fill="#647176">
+            <text x={padding.left} y={height - 8} fontSize="10" className="fill-zinc-400">
               {new Date(xMin).toLocaleTimeString()}
             </text>
             <text
               x={padding.left + innerW}
               y={height - 8}
               fontSize="10"
-              fill="#647176"
+              className="fill-zinc-400"
               textAnchor="end"
             >
               {new Date(xMax).toLocaleTimeString()}
@@ -347,14 +360,16 @@ function Chart({
             .join(" ");
           return (
             <g key={s.key}>
-              <path d={d} stroke={s.color} fill="none" strokeWidth={2} />
+              <path d={d} stroke={s.color} fill="none" strokeWidth={2.5} className="drop-shadow-sm" />
               {s.points.map((p, i) => (
                 <circle
                   key={i}
                   cx={xScale(p.x)}
                   cy={yScale(p.y)}
-                  r={2.5}
+                  r={3}
                   fill={s.color}
+                  className="stroke-white dark:stroke-zinc-900"
+                  strokeWidth="1.5"
                 >
                   <title>{`${s.key} @ ${new Date(p.x).toLocaleTimeString()}: ${formatNumber(p.y)} ${yLabel}`}</title>
                 </circle>
@@ -368,17 +383,17 @@ function Chart({
             y={height / 2}
             textAnchor="middle"
             fontSize="12"
-            fill="#94a3a8"
+            className="fill-zinc-400"
           >
             No data
           </text>
         )}
       </svg>
-      <div className="metrics-legend">
+      <div className="mt-6 flex flex-wrap gap-4 text-xs font-semibold">
         {series.map((s) => (
-          <span key={s.key} className="metrics-legend-item">
+          <span key={s.key} className="flex items-center gap-2 text-zinc-700 dark:text-zinc-300">
             <span
-              className="metrics-legend-swatch"
+              className="w-3 h-3 rounded-full shadow-inner"
               style={{ background: s.color }}
             />
             {s.key}
