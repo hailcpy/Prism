@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+import pytest
 from fastapi.testclient import TestClient
 
+from chatbot_api import main as chatbot_main
 from chatbot_api.main import Conversation, Message, app
 
 
@@ -66,45 +69,141 @@ class FakeChatStore:
                 return updated
         raise KeyError(message_id)
 
+    def delete_message(self, message_id: str) -> None:
+        self.messages = [m for m in self.messages if m.id != message_id]
+
 
 class FakePrismClient:
-    def __init__(self) -> None:
-        self.chat = FakeChat()
-        self.calls: list[dict[str, Any]] = []
-        self.chat.completions.client = self
+    def install(self) -> None:
+        return None
 
 
-class FakeChat:
-    def __init__(self) -> None:
-        self.completions = FakeCompletions()
+def _parse_sse(body: str) -> list[tuple[str, dict[str, Any]]]:
+    events: list[tuple[str, dict[str, Any]]] = []
+    for block in body.split("\n\n"):
+        if not block.strip():
+            continue
+        event = "message"
+        data_parts: list[str] = []
+        for line in block.split("\n"):
+            if line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                data_parts.append(line[5:].strip())
+        events.append((event, json.loads("\n".join(data_parts))))
+    return events
 
 
-class FakeCompletions:
-    client: FakePrismClient
-
-    def create(self, **kwargs: Any) -> dict[str, Any]:
-        self.client.calls.append(kwargs)
-        return {"choices": [{"message": {"content": "hello from model"}}]}
-
-
-def test_chatbot_creates_conversation_and_sends_message() -> None:
+@pytest.fixture
+def chatbot_client(monkeypatch):
     store = FakeChatStore()
-    prism_client = FakePrismClient()
     app.state.chat_store = store
-    app.state.prism_client = prism_client
+    app.state.prism_client = FakePrismClient()
+
+    chunks = [
+        {"choices": [{"delta": {"content": "he"}}]},
+        {"choices": [{"delta": {"content": "llo"}}]},
+    ]
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs):
+        captured["kwargs"] = kwargs
+
+        async def iterator():
+            for chunk in chunks:
+                yield chunk
+
+        return iterator()
+
+    monkeypatch.setattr(chatbot_main.litellm, "acompletion", fake_acompletion)
+    return TestClient(app), store, captured
+
+
+def test_chatbot_streams_assistant_tokens_via_sse(chatbot_client) -> None:
+    client, store, captured = chatbot_client
+
+    created = client.post("/v1/conversations", json={"model_default": "gpt-4o"})
+    conversation_id = created.json()["conversation_id"]
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        json={"role": "user", "content": "hi", "model": "gpt-4o"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = _parse_sse(response.text)
+    event_names = [event for event, _ in events]
+    assert event_names[0] == "user_message"
+    assert event_names[1] == "assistant_message"
+    deltas = [data["delta"] for event, data in events if event == "token"]
+    assert "".join(deltas) == "hello"
+    done = next(data for event, data in events if event == "done")
+    assert done["inference_id"]
+    prism_meta = captured["kwargs"]["metadata"]["prism"]
+    assert prism_meta["conversation_id"] == conversation_id
+    assert prism_meta["inference_id"] == done["inference_id"]
+
+    messages = client.get(f"/v1/conversations/{conversation_id}/messages").json()["messages"]
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[1]["content"] == "hello"
+
+
+def test_chatbot_does_not_persist_assistant_row_on_stream_failure(monkeypatch) -> None:
+    store = FakeChatStore()
+    app.state.chat_store = store
+    app.state.prism_client = FakePrismClient()
+
+    async def fake_acompletion(**kwargs):
+        async def iterator():
+            yield {"choices": [{"delta": {"content": "partial"}}]}
+            raise RuntimeError("provider blew up")
+
+        return iterator()
+
+    monkeypatch.setattr(chatbot_main.litellm, "acompletion", fake_acompletion)
     client = TestClient(app)
 
     created = client.post("/v1/conversations", json={"model_default": "gpt-4o"})
     conversation_id = created.json()["conversation_id"]
     response = client.post(
         f"/v1/conversations/{conversation_id}/messages",
-        json={"role": "user", "content": "hello", "model": "gpt-4o"},
+        json={"role": "user", "content": "hi", "model": "gpt-4o"},
     )
 
     assert response.status_code == 200
-    assert response.json()["assistant_message"]["content"] == "hello from model"
-    assert prism_client.calls[0]["conversation_id"] == conversation_id
-    assert response.json()["assistant_message"]["id"] == prism_client.calls[0]["message_id"]
+    events = _parse_sse(response.text)
+    event_names = [event for event, _ in events]
+    assert "error" in event_names
+    assert "done" not in event_names
 
     messages = client.get(f"/v1/conversations/{conversation_id}/messages").json()["messages"]
-    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert [message["role"] for message in messages] == ["user"]
+
+
+def test_chatbot_does_not_persist_assistant_row_on_empty_response(monkeypatch) -> None:
+    store = FakeChatStore()
+    app.state.chat_store = store
+    app.state.prism_client = FakePrismClient()
+
+    async def fake_acompletion(**kwargs):
+        async def iterator():
+            if False:
+                yield {}
+            return
+
+        return iterator()
+
+    monkeypatch.setattr(chatbot_main.litellm, "acompletion", fake_acompletion)
+    client = TestClient(app)
+
+    created = client.post("/v1/conversations", json={"model_default": "gpt-4o"})
+    conversation_id = created.json()["conversation_id"]
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        json={"role": "user", "content": "hi", "model": "gpt-4o"},
+    )
+
+    events = _parse_sse(response.text)
+    assert any(event == "error" for event, _ in events)
+    messages = client.get(f"/v1/conversations/{conversation_id}/messages").json()["messages"]
+    assert [message["role"] for message in messages] == ["user"]

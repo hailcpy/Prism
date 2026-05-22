@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Protocol, cast
 
+import litellm
 import psycopg
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
+import prism_sdk
 from prism_sdk import PrismClient
 
 MessageRole = Literal["user", "assistant", "system"]
@@ -50,6 +56,8 @@ class ChatStore(Protocol):
     def create_message(self, conversation_id: str, role: MessageRole, content: str) -> Message: ...
 
     def update_message_content(self, message_id: str, content: str) -> Message: ...
+
+    def delete_message(self, message_id: str) -> None: ...
 
 
 class PostgresChatStore:
@@ -155,6 +163,10 @@ class PostgresChatStore:
             )
             return _message_from_row(row)
 
+    def delete_message(self, message_id: str) -> None:
+        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM messages WHERE id = %s", (message_id,))
+
 
 class CreateConversationRequest(BaseModel):
     model_default: str = "gpt-4o"
@@ -193,11 +205,6 @@ class SendMessageRequest(BaseModel):
     role: Literal["user"] = "user"
     content: str = Field(min_length=1)
     model: str | None = None
-
-
-class SendMessageResponse(BaseModel):
-    user_message: MessageBody
-    assistant_message: MessageBody
 
 
 app = FastAPI(title="prism-chatbot-api", version="0.1.0")
@@ -257,12 +264,12 @@ def list_messages(request: Request, conversation_id: str) -> ListMessagesRespons
     )
 
 
-@app.post("/v1/conversations/{conversation_id}/messages", response_model=SendMessageResponse)
-def send_message(
+@app.post("/v1/conversations/{conversation_id}/messages")
+async def send_message(
     request: Request,
     conversation_id: str,
     body: SendMessageRequest,
-) -> SendMessageResponse:
+) -> StreamingResponse:
     store = _get_store(request.app)
     conversation = store.get_conversation(conversation_id)
     if conversation is None:
@@ -275,25 +282,95 @@ def send_message(
         system_prompt=conversation.system_prompt,
         history=store.list_messages(conversation_id),
     )
-
-    try:
-        response = _get_prism_client(request.app).chat.completions.create(
-            model=model,
-            messages=messages,
-            conversation_id=conversation_id,
-            message_id=assistant_message.id,
-            metadata={"source": "chatbot-api"},
-        )
-    except Exception as exc:
-        store.update_message_content(assistant_message.id, "")
-        raise HTTPException(status_code=502, detail=f"model call failed: {exc}") from exc
-
-    assistant_text = _response_content(response)
-    assistant_message = store.update_message_content(assistant_message.id, assistant_text)
-    return SendMessageResponse(
-        user_message=_message_body(user_message),
-        assistant_message=_message_body(assistant_message),
+    _get_prism_client(request.app)
+    inference_id = str(uuid.uuid4())
+    prism_metadata = prism_sdk.metadata(
+        conversation_id=conversation_id,
+        message_id=assistant_message.id,
+        inference_id=inference_id,
+        extra={"source": "chatbot-api"},
     )
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        yield _sse(
+            "user_message",
+            {
+                "id": user_message.id,
+                "role": "user",
+                "content": user_message.content,
+                "created_at": user_message.created_at.isoformat(),
+            },
+        )
+        yield _sse(
+            "assistant_message",
+            {
+                "id": assistant_message.id,
+                "role": "assistant",
+                "created_at": assistant_message.created_at.isoformat(),
+            },
+        )
+        collected: list[str] = []
+        try:
+            stream = await litellm.acompletion(
+                model=model,
+                messages=messages,
+                stream=True,
+                stream_options={"include_usage": True},
+                metadata=prism_metadata,
+            )
+            async for chunk in stream:
+                delta = _stream_delta(chunk)
+                if delta:
+                    collected.append(delta)
+                    yield _sse("token", {"delta": delta})
+        except (Exception, asyncio.CancelledError) as exc:
+            store.delete_message(assistant_message.id)
+            yield _sse(
+                "error",
+                {"error": {"type": type(exc).__name__, "message": str(exc)}},
+            )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return
+        content = "".join(collected)
+        if not content:
+            store.delete_message(assistant_message.id)
+            yield _sse(
+                "error",
+                {"error": {"type": "EmptyResponse", "message": "model returned no content"}},
+            )
+            return
+        store.update_message_content(assistant_message.id, content)
+        yield _sse(
+            "done",
+            {
+                "message_id": assistant_message.id,
+                "inference_id": inference_id,
+            },
+        )
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+def _sse(event: str, data: dict[str, Any]) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+def _stream_delta(chunk: Any) -> str:
+    if isinstance(chunk, dict):
+        choices = chunk.get("choices") or []
+        if not choices:
+            return ""
+        delta = choices[0].get("delta") or {}
+        return str(delta.get("content") or "")
+    choices = getattr(chunk, "choices", []) or []
+    if not choices:
+        return ""
+    delta = getattr(choices[0], "delta", None)
+    if delta is None:
+        return ""
+    content = getattr(delta, "content", None)
+    return str(content or "")
 
 
 def _llm_messages(*, system_prompt: str | None, history: list[Message]) -> list[dict[str, str]]:
@@ -306,12 +383,6 @@ def _llm_messages(*, system_prompt: str | None, history: list[Message]) -> list[
     return messages
 
 
-def _response_content(response: Any) -> str:
-    if isinstance(response, dict):
-        return str(response["choices"][0]["message"].get("content") or "")
-    return str(response.choices[0].message.content or "")
-
-
 def _get_store(app: FastAPI) -> ChatStore:
     if app.state.chat_store is None:
         app.state.chat_store = PostgresChatStore(os.environ["DATABASE_URL"])
@@ -321,10 +392,12 @@ def _get_store(app: FastAPI) -> ChatStore:
 def _get_prism_client(app: FastAPI) -> PrismClient:
     if app.state.prism_client is None:
         sink = os.getenv("PRISM_SDK_SINK", "http")
-        app.state.prism_client = PrismClient(
+        client = PrismClient(
             ingestion_url=os.getenv("INGESTION_URL", "http://localhost:8001"),
             sink=cast(Literal["http", "noop", "stdout"], sink),
         )
+        client.install()
+        app.state.prism_client = client
     return app.state.prism_client
 
 

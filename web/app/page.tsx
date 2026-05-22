@@ -16,6 +16,57 @@ type Message = {
   created_at: string;
 };
 
+type SseEvent = { event: string; data: Record<string, unknown> };
+
+async function* readSseStream(
+  body: ReadableStream<Uint8Array>,
+): AsyncIterableIterator<SseEvent> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const parsed = parseSseBlock(block);
+        if (parsed) {
+          yield parsed;
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function parseSseBlock(block: string): SseEvent | null {
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trim());
+    }
+  }
+  if (dataLines.length === 0) {
+    return null;
+  }
+  try {
+    return { event, data: JSON.parse(dataLines.join("\n")) };
+  } catch {
+    return null;
+  }
+}
+
 const models = [
   { label: "GPT-4o", value: "gpt-4o" },
   { label: "Claude Sonnet", value: "claude-3-5-sonnet-latest" },
@@ -127,12 +178,20 @@ export default function Home() {
       }
 
       setDraft("");
+      const draftUserId = `local-user-${Date.now()}`;
+      const draftAssistantId = `local-asst-${Date.now()}`;
       setMessages((current) => [
         ...current,
         {
-          id: `local-${Date.now()}`,
+          id: draftUserId,
           role: "user",
           content,
+          created_at: new Date().toISOString(),
+        },
+        {
+          id: draftAssistantId,
+          role: "assistant",
+          content: "",
           created_at: new Date().toISOString(),
         },
       ]);
@@ -141,23 +200,65 @@ export default function Home() {
         `${apiUrl}/v1/conversations/${activeConversationId}/messages`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+          },
           body: JSON.stringify({ role: "user", content, model }),
         },
       );
-      if (!response.ok) {
-        const body = (await response.json()) as { detail?: string };
-        throw new Error(body.detail ?? "send failed");
+      if (!response.ok || !response.body) {
+        const text = await response.text();
+        throw new Error(text || "send failed");
       }
-      const body = (await response.json()) as {
-        user_message: Message;
-        assistant_message: Message;
-      };
-      setMessages((current) => [
-        ...current.filter((message) => !message.id.startsWith("local-")),
-        body.user_message,
-        body.assistant_message,
-      ]);
+
+      let userId = draftUserId;
+      let assistantId = draftAssistantId;
+      let streamError: string | null = null;
+      for await (const { event, data } of readSseStream(response.body)) {
+        if (event === "user_message") {
+          userId = data.id as string;
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === draftUserId
+                ? {
+                    ...message,
+                    id: userId,
+                    created_at: data.created_at as string,
+                  }
+                : message,
+            ),
+          );
+        } else if (event === "assistant_message") {
+          assistantId = data.id as string;
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === draftAssistantId
+                ? {
+                    ...message,
+                    id: assistantId,
+                    created_at: data.created_at as string,
+                  }
+                : message,
+            ),
+          );
+        } else if (event === "token") {
+          const delta = (data.delta as string) ?? "";
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantId
+                ? { ...message, content: message.content + delta }
+                : message,
+            ),
+          );
+        } else if (event === "error") {
+          const detail = data.error as { message?: string } | undefined;
+          streamError = detail?.message ?? "stream error";
+        }
+      }
+      if (streamError) {
+        throw new Error(streamError);
+      }
       await loadConversations();
     } catch (error) {
       setStatus(

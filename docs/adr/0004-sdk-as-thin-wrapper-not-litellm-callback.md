@@ -1,6 +1,6 @@
 # ADR-0004: SDK wraps LiteLLM explicitly, not via `success_callback`
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0011
 - **Date:** 2026-05-21
 
 ## Context
