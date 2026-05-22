@@ -181,14 +181,14 @@ export default function DashboardEditorPage() {
   }, []);
 
   return (
-    <main className="dash-shell">
-      <header className="dash-header">
-        <div className="dash-header-left">
-          <Link href="/dashboards" className="dash-back">
+    <main className="min-h-[calc(100vh-56px)] bg-mesh-light dark:bg-mesh-dark flex flex-col text-zinc-900 dark:text-zinc-100">
+      <header className="p-4 md:px-8 border-b border-black/10 dark:border-white/10 bg-white/40 dark:bg-zinc-900/40 backdrop-blur-md flex flex-col md:flex-row justify-between items-start md:items-center gap-4 sticky top-0 z-10">
+        <div className="flex items-center gap-4 flex-1 w-full max-w-2xl">
+          <Link href="/dashboards" className="text-[#009f8f] dark:text-[#ff6d4d] font-bold shrink-0 hover:opacity-80 transition-opacity">
             ← Dashboards
           </Link>
           <input
-            className="dash-name-input"
+            className="flex-1 bg-transparent px-3 py-1.5 focus:bg-white dark:focus:bg-zinc-800 border-b border-dashed border-zinc-400 focus:border-solid focus:border-[#009f8f] outline-none font-bold text-lg transition-all"
             value={name}
             onChange={(e) => {
               setName(e.target.value);
@@ -196,10 +196,11 @@ export default function DashboardEditorPage() {
             }}
           />
         </div>
-        <div className="dash-header-actions">
-          <label>
-            Range
+        <div className="flex items-center gap-3 w-full md:w-auto overflow-x-auto pb-1 md:pb-0">
+          <label className="flex items-center gap-2 text-xs font-semibold text-zinc-600 dark:text-zinc-400 shrink-0">
+            RANGE
             <select
+              className="px-3 py-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#009f8f]/30 text-zinc-900 dark:text-zinc-100"
               value={rangeMinutes}
               onChange={(e) => setRangeMinutes(Number(e.target.value))}
             >
@@ -210,57 +211,68 @@ export default function DashboardEditorPage() {
               ))}
             </select>
           </label>
-          <button type="button" onClick={() => void loadData()}>
+          <button 
+            type="button" 
+            onClick={() => void loadData()}
+            className="px-4 py-1.5 rounded-lg bg-zinc-200 dark:bg-zinc-700 text-sm font-semibold hover:bg-zinc-300 dark:hover:bg-zinc-600 transition-colors shrink-0"
+          >
             Refresh
           </button>
           <button
             type="button"
             onClick={() => void handleSave()}
             disabled={saving || !dirty}
-            className="dash-save"
+            className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-all shrink-0 ${
+              dirty 
+                ? "bg-gradient-to-br from-[#ff6d4d] to-[#2453ff] text-white hover:opacity-90" 
+                : "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed"
+            }`}
           >
             {saving ? "Saving…" : dirty ? "Save" : "Saved"}
           </button>
         </div>
       </header>
-      {error && <div className="dash-error">{error}</div>}
-      <div className="dash-editor">
-        <aside className="dash-palette">
-          <h2>Widgets</h2>
-          <p className="dash-palette-hint">
-            Click a widget to add it. Drag a cell to reorder. Resize with the
-            buttons on each cell.
+      {error && <div className="p-3 m-4 rounded bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 text-sm border border-red-200 dark:border-red-800/30">{error}</div>}
+      <div className="flex-1 flex flex-col md:flex-row overflow-hidden relative">
+        <aside className="w-full md:w-64 p-4 md:p-6 bg-white/40 dark:bg-zinc-900/40 backdrop-blur-3xl border-r border-black/10 dark:border-white/10 flex flex-col overflow-y-auto z-10 shrink-0">
+          <h2 className="text-lg font-bold mb-2">Widgets</h2>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed mb-6">
+            Click a widget to add it. Drag a cell header to reorder. Resize with the buttons on each cell.
           </p>
-          {WIDGET_PRESETS.map((preset) => (
-            <button
-              key={preset.label}
-              type="button"
-              className="dash-palette-item"
-              onClick={() => addCell(preset)}
-            >
-              {preset.label}
-            </button>
-          ))}
+          <div className="flex flex-col gap-2">
+            {WIDGET_PRESETS.map((preset) => (
+              <button
+                key={preset.label}
+                type="button"
+                className="text-left px-3 py-2 rounded-lg text-sm font-medium bg-white dark:bg-zinc-800 border border-black/5 dark:border-white/5 hover:border-[#009f8f]/50 transition-colors shadow-sm"
+                onClick={() => addCell(preset)}
+              >
+                + {preset.label}
+              </button>
+            ))}
+          </div>
         </aside>
-        <section className="dash-grid">
+        <section className="flex-1 p-4 md:p-8 overflow-y-auto custom-scrollbar">
           {cells.length === 0 && (
-            <div className="dash-grid-empty">
+            <div className="text-center bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md rounded-2xl border border-dashed border-black/10 dark:border-white/10 max-w-lg mx-auto py-16 text-zinc-500 dark:text-zinc-400 font-medium">
               Add widgets from the palette to start building your dashboard.
             </div>
           )}
-          {cells.map((cell) => (
-            <CellView
-              key={cell.i}
-              cell={cell}
-              result={data?.widgets[cell.i]}
-              onRemove={() => removeCell(cell.i)}
-              onWidthChange={(w) => updateCell(cell.i, { w })}
-              onHeightChange={(h) => updateCell(cell.i, { h })}
-              onTitleChange={(title) => updateWidget(cell.i, { title })}
-              onDragStart={() => handleDragStart(cell.i)}
-              onDrop={() => handleDrop(cell.i)}
-            />
-          ))}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-6 auto-rows-[minmax(120px,auto)] place-items-stretch">
+            {cells.map((cell) => (
+              <CellView
+                key={cell.i}
+                cell={cell}
+                result={data?.widgets[cell.i]}
+                onRemove={() => removeCell(cell.i)}
+                onWidthChange={(w) => updateCell(cell.i, { w })}
+                onHeightChange={(h) => updateCell(cell.i, { h })}
+                onTitleChange={(title) => updateWidget(cell.i, { title })}
+                onDragStart={() => handleDragStart(cell.i)}
+                onDrop={() => handleDrop(cell.i)}
+              />
+            ))}
+          </div>
         </section>
       </div>
     </main>
@@ -278,6 +290,11 @@ type CellViewProps = {
   onDrop: () => void;
 };
 
+// Map cell.w to Tailwind grid columns specifically.
+// Note: dynamically injecting `col-span-${w}` can fail in Tailwind if the class isn't detected at compile time,
+// but since cell.w goes from 1 to 12, we can just use an inline style or a class mapper.
+// I will use an inline style for the grid layout span so it accurately follows the dynamic value.
+
 function CellView({
   cell,
   result,
@@ -292,50 +309,60 @@ function CellView({
     event.preventDefault();
   return (
     <div
-      className="dash-cell"
+      className="bg-white/90 dark:bg-zinc-800/90 backdrop-blur-xl border border-black/10 dark:border-white/10 rounded-2xl shadow-sm flex flex-col overflow-hidden transition-all"
       style={{ gridColumn: `span ${cell.w}`, gridRow: `span ${cell.h}` }}
       draggable
       onDragStart={onDragStart}
       onDragOver={handleDragOver}
       onDrop={onDrop}
     >
-      <header className="dash-cell-header">
+      <header className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-b border-black/5 dark:border-white/5 bg-black/5 dark:bg-white/5 cursor-move">
         <input
-          className="dash-cell-title"
+          className="flex-1 min-w-0 bg-transparent outline-none font-bold text-sm text-zinc-900 dark:text-zinc-100"
           value={cell.widget.title ?? METRIC_LABELS[cell.widget.metric_kind]}
           onChange={(e) => onTitleChange(e.target.value)}
+          onClick={(e) => e.stopPropagation()}
         />
-        <div className="dash-cell-controls">
+        <div className="flex items-center gap-1">
           <button
             type="button"
-            onClick={() => onWidthChange(Math.max(2, cell.w - 1))}
+            className="w-6 h-6 flex items-center justify-center rounded text-xs font-mono font-bold text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700"
+            onClick={(e) => { e.stopPropagation(); onWidthChange(Math.max(2, cell.w - 1)); }}
           >
-            −W
+            -w
           </button>
           <button
             type="button"
-            onClick={() => onWidthChange(Math.min(12, cell.w + 1))}
+            className="w-6 h-6 flex items-center justify-center rounded text-xs font-mono font-bold text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700"
+            onClick={(e) => { e.stopPropagation(); onWidthChange(Math.min(12, cell.w + 1)); }}
           >
-            +W
+            +w
           </button>
           <button
             type="button"
-            onClick={() => onHeightChange(Math.max(1, cell.h - 1))}
+            className="w-6 h-6 flex items-center justify-center rounded text-xs font-mono font-bold text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 ml-1"
+            onClick={(e) => { e.stopPropagation(); onHeightChange(Math.max(1, cell.h - 1)); }}
           >
-            −H
+            -h
           </button>
           <button
             type="button"
-            onClick={() => onHeightChange(Math.min(4, cell.h + 1))}
+            className="w-6 h-6 flex items-center justify-center rounded text-xs font-mono font-bold text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700"
+            onClick={(e) => { e.stopPropagation(); onHeightChange(Math.min(4, cell.h + 1)); }}
           >
-            +H
+            +h
           </button>
-          <button type="button" onClick={onRemove} className="dash-cell-remove">
+          <button 
+            type="button" 
+            onClick={(e) => { e.stopPropagation(); onRemove(); }} 
+            className="w-6 h-6 flex items-center justify-center rounded text-[16px] leading-none text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 ml-2"
+            title="Remove Widget"
+          >
             ×
           </button>
         </div>
       </header>
-      <div className="dash-cell-body">
+      <div className="flex-1 p-4 flex flex-col justify-center min-h-[100px] overflow-x-auto min-w-0">
         <WidgetView cell={cell} result={result} />
       </div>
     </div>
@@ -349,10 +376,10 @@ function WidgetView({
   cell: WidgetCell;
   result: WidgetResult | undefined;
 }) {
-  if (!result) return <div className="dash-widget-empty">Loading…</div>;
+  if (!result) return <div className="text-zinc-400 text-sm text-center">Loading…</div>;
   if (result.kind === "bignum") {
     return (
-      <div className="dash-bignum">
+      <div className="text-4xl md:text-5xl lg:text-6xl font-black text-center text-zinc-900 dark:text-zinc-100 tracking-tight">
         {formatValue(result.value, cell.widget.metric_kind)}
       </div>
     );
@@ -370,7 +397,7 @@ function TimeseriesChart({
   const seriesEntries = Object.entries(result.series);
   const points = seriesEntries.flatMap(([, list]) => list);
   if (points.length === 0)
-    return <div className="dash-widget-empty">No data in range.</div>;
+    return <div className="text-zinc-400 text-sm text-center">No data in range.</div>;
   const xs = points.map((p) => new Date(p.bucket).getTime());
   const ys = points.map((p) => p.value);
   const minX = Math.min(...xs);
@@ -384,7 +411,7 @@ function TimeseriesChart({
   const projectY = (y: number) =>
     height - padding - (y / maxY) * (height - padding * 2);
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="dash-chart">
+    <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full min-h-[140px] drop-shadow-sm">
       {seriesEntries.map(([key, list], idx) => {
         const path = list
           .map((point, i) => {
@@ -399,7 +426,7 @@ function TimeseriesChart({
             d={path}
             fill="none"
             stroke={SERIES_COLORS[idx % SERIES_COLORS.length]}
-            strokeWidth={2}
+            strokeWidth={3}
           />
         );
       })}
@@ -408,14 +435,15 @@ function TimeseriesChart({
           {seriesEntries.map(([key], idx) => (
             <g
               key={key}
-              transform={`translate(${padding + idx * 120}, ${padding - 8})`}
+              transform={`translate(${padding + idx * 120}, ${padding - 12})`}
             >
               <rect
                 width={10}
                 height={10}
+                rx={2}
                 fill={SERIES_COLORS[idx % SERIES_COLORS.length]}
               />
-              <text x={14} y={9} fontSize={11}>
+              <text x={16} y={9} fontSize={11} className="fill-zinc-600 dark:fill-zinc-400 font-semibold" textLength="100" fontStyle="11px">
                 {key}
               </text>
             </g>
@@ -433,14 +461,14 @@ function PieChart({
 }) {
   const total = result.slices.reduce((sum, slice) => sum + slice.value, 0);
   if (total <= 0)
-    return <div className="dash-widget-empty">No data in range.</div>;
+    return <div className="text-zinc-400 text-sm text-center">No data in range.</div>;
   let cumulative = 0;
   const cx = 100;
   const cy = 100;
   const r = 80;
   return (
-    <div className="dash-pie-wrap">
-      <svg viewBox="0 0 200 200" className="dash-pie">
+    <div className="flex flex-row items-center gap-6 h-full">
+      <svg viewBox="0 0 200 200" className="w-[120px] h-[120px] shrink-0 drop-shadow-md">
         {result.slices.map((slice, idx) => {
           const startAngle = (cumulative / total) * Math.PI * 2;
           cumulative += slice.value;
@@ -456,19 +484,21 @@ function PieChart({
               key={slice.label}
               d={path}
               fill={SERIES_COLORS[idx % SERIES_COLORS.length]}
+              stroke="rgba(0,0,0,0.1)"
+              strokeWidth="1"
             />
           );
         })}
       </svg>
-      <ul className="dash-pie-legend">
+      <ul className="flex flex-col gap-2 flex-1">
         {result.slices.map((slice, idx) => (
-          <li key={slice.label}>
+          <li key={slice.label} className="flex items-center gap-2 text-sm font-semibold text-zinc-800 dark:text-zinc-200">
             <span
-              className="dash-pie-swatch"
+              className="w-3 h-3 rounded-full shadow-inner shrink-0"
               style={{ background: SERIES_COLORS[idx % SERIES_COLORS.length] }}
             />
-            <span>{slice.label}</span>
-            <span className="dash-pie-value">{slice.value.toFixed(2)}</span>
+            <span className="truncate">{slice.label}</span>
+            <span className="ml-auto text-zinc-500 font-mono tracking-tighter">{(slice.value / total * 100).toFixed(0)}%</span>
           </li>
         ))}
       </ul>
@@ -482,22 +512,26 @@ function TableView({
   result: Extract<WidgetResult, { kind: "table" }>;
 }) {
   if (result.rows.length === 0)
-    return <div className="dash-widget-empty">No data in range.</div>;
+    return <div className="text-zinc-400 text-sm text-center">No data in range.</div>;
   return (
-    <div className="dash-table-wrap">
-      <table className="dash-table">
-        <thead>
+    <div className="w-full h-full overflow-auto custom-scrollbar">
+      <table className="w-full text-left text-sm border-collapse whitespace-nowrap">
+        <thead className="bg-black/5 dark:bg-white/5 sticky top-0 backdrop-blur-sm z-10">
           <tr>
             {result.columns.map((col) => (
-              <th key={col}>{col}</th>
+              <th key={col} className="p-3 font-semibold text-zinc-600 dark:text-zinc-400 capitalize tracking-wide text-xs">
+                {col.replace(/_/g, " ")}
+              </th>
             ))}
           </tr>
         </thead>
-        <tbody>
+        <tbody className="divide-y divide-black/5 dark:divide-white/5">
           {result.rows.map((row, idx) => (
-            <tr key={idx}>
+            <tr key={idx} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
               {result.columns.map((col) => (
-                <td key={col}>{formatCell(row[col])}</td>
+                <td key={col} className="p-3 text-zinc-800 dark:text-zinc-200 font-mono text-[13px]">
+                  {formatCell(row[col])}
+                </td>
               ))}
             </tr>
           ))}

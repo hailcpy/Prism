@@ -155,24 +155,25 @@ export default function SettingsPage() {
   }, [credentials]);
 
   return (
-    <main className="settings-shell">
-      <header className="settings-header">
-        <h1>Settings</h1>
-        <p>
+    <main className="max-w-4xl mx-auto p-8 space-y-8 min-h-[calc(100vh-56px)] bg-mesh-light dark:bg-mesh-dark text-zinc-900 dark:text-zinc-100">
+      <header className="mb-8">
+        <h1 className="text-3xl font-bold mb-2">Settings</h1>
+        <p className="text-zinc-500 dark:text-zinc-400">
           Provider credentials are encrypted at rest. The chat page lists models
           discovered from the default credential of each provider.
         </p>
       </header>
 
-      <section className="settings-card">
-        <h2>Add credential</h2>
-        <p className="card-subtitle">
+      <section className="bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md rounded-2xl border border-black/10 dark:border-white/10 p-6 shadow-sm">
+        <h2 className="text-xl font-bold mb-1">Add credential</h2>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-6">
           Pick a provider — the required fields are loaded from the backend.
         </p>
-        <form onSubmit={onSave} className="cred-form">
-          <div className="cred-field">
-            <label>Provider</label>
+        <form onSubmit={onSave} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-semibold">Provider</label>
             <select
+              className="px-3 py-2 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#009f8f]/30"
               value={providerId}
               onChange={(e) => onProviderChange(e.target.value)}
             >
@@ -183,9 +184,10 @@ export default function SettingsPage() {
               ))}
             </select>
           </div>
-          <div className="cred-field">
-            <label>Name</label>
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-semibold">Name</label>
             <input
+              className="px-3 py-2 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm outline-none focus:ring-2 focus:ring-[#009f8f]/30"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. personal-key"
@@ -193,12 +195,13 @@ export default function SettingsPage() {
             />
           </div>
           {selected?.secret_fields.map((f) => (
-            <div className="cred-field" key={`s-${f.name}`}>
-              <label>
+            <div className="flex flex-col gap-1" key={`s-${f.name}`}>
+              <label className="text-sm font-semibold">
                 {f.label}
                 {f.required ? "" : " (optional)"}
               </label>
               <input
+                className="px-3 py-2 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm outline-none focus:ring-2 focus:ring-[#009f8f]/30"
                 type="password"
                 value={fields[f.name] ?? ""}
                 onChange={(e) => setField(f.name, e.target.value)}
@@ -209,38 +212,44 @@ export default function SettingsPage() {
             </div>
           ))}
           {selected?.metadata_fields.map((f) => (
-            <div className="cred-field" key={`m-${f.name}`}>
-              <label>
+            <div className="flex flex-col gap-1" key={`m-${f.name}`}>
+              <label className="text-sm font-semibold">
                 {f.label}
                 {f.required ? "" : " (optional)"}
               </label>
               <input
+                className="px-3 py-2 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm outline-none focus:ring-2 focus:ring-[#009f8f]/30"
                 value={fields[f.name] ?? ""}
                 onChange={(e) => setField(f.name, e.target.value)}
                 placeholder={f.default ?? ""}
                 required={f.required}
               />
               {f.default ? (
-                <span className="field-hint">default: {f.default}</span>
+                <span className="text-xs text-zinc-500">default: {f.default}</span>
               ) : null}
             </div>
           ))}
 
-          <div className="cred-actions" style={{ gridColumn: "1 / -1" }}>
-            <button type="submit" className="primary" disabled={busy}>
+          <div className="sm:col-span-2 flex flex-wrap items-center gap-4 mt-2">
+            <button
+              type="submit"
+              className="px-4 py-2 rounded-lg bg-gradient-to-br from-[#ff6d4d] to-[#2453ff] text-white font-semibold transition-all hover:opacity-90 disabled:opacity-50"
+              disabled={busy}
+            >
               {busy ? "Saving…" : "Save credential"}
             </button>
             <button
               type="button"
-              className="secondary"
+              className="px-4 py-2 rounded-lg bg-zinc-200 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 font-semibold transition-all hover:bg-zinc-300 dark:hover:bg-zinc-700 disabled:opacity-50"
               onClick={onTest}
               disabled={test.status === "testing"}
             >
               {test.status === "testing" ? "Testing…" : "Test connection"}
             </button>
-            <label className="cred-default">
+            <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300 ml-auto cursor-pointer">
               <input
                 type="checkbox"
+                className="rounded border-gray-300 focus:ring-[#009f8f] h-4 w-4"
                 checked={isDefault}
                 onChange={(e) => setIsDefault(e.target.checked)}
               />
@@ -249,7 +258,7 @@ export default function SettingsPage() {
           </div>
 
           {test.status === "ok" ? (
-            <div className="cred-status ok" style={{ gridColumn: "1 / -1" }}>
+            <div className="sm:col-span-2 p-3 mt-2 rounded bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 text-sm border border-green-200 dark:border-green-800/30">
               ✓ Connected. Models available:{" "}
               {test.models.length === 0
                 ? "(none returned)"
@@ -258,64 +267,66 @@ export default function SettingsPage() {
             </div>
           ) : null}
           {test.status === "err" ? (
-            <div className="cred-status err" style={{ gridColumn: "1 / -1" }}>
+            <div className="sm:col-span-2 p-3 mt-2 rounded bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 text-sm border border-red-200 dark:border-red-800/30">
               ✗ {test.error}
             </div>
           ) : null}
           {error ? (
-            <div className="cred-status err" style={{ gridColumn: "1 / -1" }}>
+            <div className="sm:col-span-2 p-3 mt-2 rounded bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 text-sm border border-red-200 dark:border-red-800/30">
               {error}
             </div>
           ) : null}
         </form>
       </section>
 
-      <section className="settings-card">
-        <h2>Saved credentials</h2>
+      <section className="bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md rounded-2xl border border-black/10 dark:border-white/10 p-6 shadow-sm">
+        <h2 className="text-xl font-bold mb-4">Saved credentials</h2>
         {credentials.length === 0 ? (
-          <p className="card-subtitle">No credentials yet.</p>
+          <p className="text-zinc-500 dark:text-zinc-400">No credentials yet.</p>
         ) : null}
         {grouped.map(([provider, items]) => (
-          <div key={provider}>
-            <h3
-              style={{
-                margin: "8px 0 10px 0",
-                fontSize: 13,
-                color: "#6b7c80",
-                textTransform: "uppercase",
-                letterSpacing: "0.05em",
-              }}
-            >
+          <div key={provider} className="mb-6 last:mb-0">
+            <h3 className="text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-3">
               {providers.find((p) => p.id === provider)?.label ?? provider}
             </h3>
-            <ul className="cred-list">
+            <ul className="space-y-3">
               {items.map((c) => (
                 <li
                   key={c.id}
-                  className={`cred-row ${c.is_default ? "default" : ""}`}
+                  className={`flex items-center justify-between p-4 rounded-xl border ${
+                    c.is_default
+                      ? "border-[#009f8f]/30 bg-gradient-to-br from-[#009f8f]/5 to-transparent dark:border-[#009f8f]/50 dark:from-[#009f8f]/10"
+                      : "border-black/5 dark:border-white/5 bg-white dark:bg-zinc-800/50"
+                  }`}
                 >
-                  <span className="provider-chip">{c.provider}</span>
-                  <div>
-                    <div className="cred-name">
-                      {c.name}
-                      {c.is_default ? (
-                        <span className="default-pill">default</span>
-                      ) : null}
-                    </div>
-                    <div className="cred-meta">
-                      {Object.entries(c.metadata)
-                        .map(([k, v]) => `${k}: ${v}`)
-                        .join(" · ") || "—"}
-                      {c.last_test_ok === true
-                        ? ` · last test ✓ ${c.last_tested_at ?? ""}`
-                        : c.last_test_ok === false
-                          ? ` · last test ✗ ${c.last_test_error ?? ""}`
-                          : ""}
+                  <div className="flex items-center gap-4">
+                    <span className="px-2.5 py-1 rounded bg-zinc-100 dark:bg-zinc-800 text-xs font-mono text-zinc-600 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700">
+                      {c.provider}
+                    </span>
+                    <div>
+                      <div className="font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+                        {c.name}
+                        {c.is_default ? (
+                          <span className="px-2 py-0.5 rounded-full bg-[#009f8f]/10 text-[#009f8f] text-[10px] uppercase font-bold tracking-wider">
+                            default
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                        {Object.entries(c.metadata)
+                          .map(([k, v]) => `${k}: ${v}`)
+                          .join(" · ") || "—"}
+                        {c.last_test_ok === true
+                          ? ` · last test ✓ ${c.last_tested_at ?? ""}`
+                          : c.last_test_ok === false
+                            ? ` · last test ✗ ${c.last_test_error ?? ""}`
+                            : ""}
+                      </div>
                     </div>
                   </div>
-                  <div className="cred-actions-row">
+                  <div>
                     <button
-                      className="danger"
+                      className="px-3 py-1.5 rounded-lg text-sm font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
                       onClick={() => void onDelete(c.id)}
                     >
                       Delete
