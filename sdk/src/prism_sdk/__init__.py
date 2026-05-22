@@ -26,6 +26,7 @@ def metadata(
     conversation_id: str,
     message_id: str,
     inference_id: str | None = None,
+    provider: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the value to pass as `metadata=` to `litellm.completion(...)`.
@@ -34,14 +35,15 @@ def metadata(
     captured inference back to a chat message. `extra` ends up verbatim in
     inference_logs.metadata_jsonb.
     """
-    return {
-        "prism": {
-            "conversation_id": conversation_id,
-            "message_id": message_id,
-            "inference_id": inference_id,
-            "extra": extra or {},
-        }
+    prism = {
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "inference_id": inference_id,
+        "extra": extra or {},
     }
+    if provider is not None:
+        prism["provider"] = provider
+    return {"prism": prism}
 
 
 class PrismClient:
@@ -259,7 +261,7 @@ def _build_event(
         return None
     completion_start = kwargs.get("completion_start_time")
     ttft_ms = _ms_between(start_time, completion_start) if completion_start else None
-    model = kwargs.get("model", "") or ""
+    model = _logged_model(kwargs.get("model", "") or "")
     messages = kwargs.get("messages") or []
     inference_id = prism_meta.get("inference_id") or str(uuid.uuid4())
 
@@ -269,7 +271,7 @@ def _build_event(
         "conversation_id": prism_meta.get("conversation_id"),
         "message_id": prism_meta.get("message_id"),
         "model": model,
-        "provider": _provider_from_model(model),
+        "provider": _provider_from_context(prism_meta, kwargs, model),
         "status": status,
         "error": error,
         "ts_start": _iso(_ensure_utc(start_time)),
@@ -338,8 +340,34 @@ def _response_usage(response_obj: Any) -> dict[str, int | None]:
     }
 
 
+def _provider_from_context(
+    prism_meta: Mapping[str, Any], kwargs: Mapping[str, Any], model: str
+) -> str:
+    prism_provider = prism_meta.get("provider")
+    if isinstance(prism_provider, str) and prism_provider:
+        return prism_provider
+
+    litellm_params = kwargs.get("litellm_params")
+    if isinstance(litellm_params, Mapping):
+        callback_provider = litellm_params.get("custom_llm_provider")
+        if isinstance(callback_provider, str) and callback_provider:
+            return callback_provider
+
+    callback_provider = kwargs.get("custom_llm_provider")
+    if isinstance(callback_provider, str) and callback_provider:
+        return callback_provider
+
+    try:
+        _, provider, _, _ = litellm.get_llm_provider(model)
+    except Exception:  # noqa: BLE001 - provider detection is best-effort fallback.
+        return _provider_from_model(model)
+    return provider
+
+
 def _provider_from_model(model: str) -> str:
     lowered = model.lower()
+    if lowered.startswith("bedrock/") or lowered.startswith("converse/arn:aws:bedrock:"):
+        return "bedrock"
     if lowered.startswith("claude") or lowered.startswith("anthropic/"):
         return "anthropic"
     if lowered.startswith("gemini") or lowered.startswith("google/"):
@@ -347,6 +375,12 @@ def _provider_from_model(model: str) -> str:
     if lowered.startswith("azure/"):
         return "azure"
     return "openai"
+
+
+def _logged_model(model: str) -> str:
+    if model.startswith("converse/arn:aws:bedrock:"):
+        return f"bedrock/{model}"
+    return model
 
 
 def _get(value: Any, key: str, default: Any) -> Any:

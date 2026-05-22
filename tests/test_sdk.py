@@ -27,6 +27,12 @@ def test_metadata_helper_namespaces_under_prism() -> None:
     }
 
 
+def test_metadata_helper_can_carry_explicit_provider() -> None:
+    meta = prism_sdk.metadata(conversation_id="c1", message_id="m1", provider="bedrock")
+
+    assert meta["prism"]["provider"] == "bedrock"
+
+
 def test_install_registers_callback_and_uninstall_removes_it(monkeypatch) -> None:
     monkeypatch.setattr(prism_sdk.litellm, "callbacks", [])
     client = prism_sdk.PrismClient(sink="noop")
@@ -84,6 +90,67 @@ def test_callback_success_event_builds_inference_event() -> None:
     assert event["usage"]["total_tokens"] == 6
     assert event["response_preview"] == "pong"
     assert event["prompt_preview"] == "ping"
+
+
+def test_callback_prefers_explicit_prism_provider_over_model_fallback() -> None:
+    client = _CapturingClient()
+    cb = prism_sdk.PrismCallback(client)
+    start = datetime(2026, 5, 22, 10, 0, 0, tzinfo=UTC)
+    end = start + timedelta(milliseconds=10)
+    kwargs = _kwargs(prism_sdk.metadata(conversation_id="c1", message_id="m1", provider="bedrock"))
+    kwargs["model"] = "gpt-4o"
+
+    cb.log_success_event(kwargs, {"choices": [{"message": {"content": "ok"}}]}, start, end)
+
+    assert client.captured[0]["provider"] == "bedrock"
+
+
+def test_callback_uses_litellm_provider_when_metadata_has_none() -> None:
+    client = _CapturingClient()
+    cb = prism_sdk.PrismCallback(client)
+    start = datetime(2026, 5, 22, 10, 0, 0, tzinfo=UTC)
+    end = start + timedelta(milliseconds=10)
+    kwargs = _kwargs(prism_sdk.metadata(conversation_id="c1", message_id="m1"))
+    kwargs["litellm_params"] = {
+        "metadata": kwargs.pop("metadata"),
+        "custom_llm_provider": "bedrock",
+    }
+
+    cb.log_success_event(kwargs, {"choices": [{"message": {"content": "ok"}}]}, start, end)
+
+    assert client.captured[0]["provider"] == "bedrock"
+
+
+def test_callback_classifies_bedrock_models_as_bedrock_provider() -> None:
+    client = _CapturingClient()
+    cb = prism_sdk.PrismCallback(client)
+    start = datetime(2026, 5, 22, 10, 0, 0, tzinfo=UTC)
+    end = start + timedelta(milliseconds=10)
+    kwargs = _kwargs(prism_sdk.metadata(conversation_id="c1", message_id="m1"))
+    kwargs["model"] = (
+        "bedrock/converse/"
+        "arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/hnxtndg2c380"
+    )
+
+    cb.log_success_event(kwargs, {"choices": [{"message": {"content": "ok"}}]}, start, end)
+
+    assert client.captured[0]["provider"] == "bedrock"
+
+
+def test_callback_restores_bedrock_prefix_when_litellm_reports_converse_arn() -> None:
+    client = _CapturingClient()
+    cb = prism_sdk.PrismCallback(client)
+    start = datetime(2026, 5, 22, 10, 0, 0, tzinfo=UTC)
+    end = start + timedelta(milliseconds=10)
+    kwargs = _kwargs(prism_sdk.metadata(conversation_id="c1", message_id="m1"))
+    kwargs["model"] = (
+        "converse/arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/hnxtndg2c380"
+    )
+
+    cb.log_success_event(kwargs, {"choices": [{"message": {"content": "ok"}}]}, start, end)
+
+    assert client.captured[0]["model"].startswith("bedrock/converse/arn:aws:bedrock:")
+    assert client.captured[0]["provider"] == "bedrock"
 
 
 def test_callback_failure_event_captures_exception() -> None:

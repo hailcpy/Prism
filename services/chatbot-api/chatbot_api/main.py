@@ -280,7 +280,7 @@ async def send_message(
 
     user_message = store.create_message(conversation_id, "user", body.content)
     assistant_message = store.create_message(conversation_id, "assistant", "")
-    model = body.model or conversation.model_default
+    model, provider = _litellm_model_and_provider(body.model or conversation.model_default)
     messages = _llm_messages(
         system_prompt=conversation.system_prompt,
         history=store.list_messages(conversation_id),
@@ -291,6 +291,7 @@ async def send_message(
         conversation_id=conversation_id,
         message_id=assistant_message.id,
         inference_id=inference_id,
+        provider=provider,
         extra={"source": "chatbot-api"},
     )
 
@@ -384,6 +385,13 @@ def _llm_messages(*, system_prompt: str | None, history: list[Message]) -> list[
         if message.role in {"user", "assistant"} and message.content:
             messages.append({"role": message.role, "content": message.content})
     return messages
+
+
+def _litellm_model_and_provider(model: str) -> tuple[str, str]:
+    if model.startswith("bedrock/arn:"):
+        model = f"bedrock/converse/{model.removeprefix('bedrock/')}"
+    _, provider, _, _ = litellm.get_llm_provider(model)
+    return model, provider
 
 
 def _get_store(app: FastAPI) -> ChatStore:

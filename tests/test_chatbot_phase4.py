@@ -142,10 +142,48 @@ def test_chatbot_streams_assistant_tokens_via_sse(chatbot_client) -> None:
     prism_meta = captured["kwargs"]["metadata"]["prism"]
     assert prism_meta["conversation_id"] == conversation_id
     assert prism_meta["inference_id"] == done["inference_id"]
+    assert prism_meta["provider"] == "openai"
 
     messages = client.get(f"/v1/conversations/{conversation_id}/messages").json()["messages"]
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assert messages[1]["content"] == "hello"
+
+
+def test_chatbot_routes_bedrock_application_profiles_through_converse(chatbot_client) -> None:
+    client, _, captured = chatbot_client
+    profile_arn = (
+        "arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/hnxtndg2c380"
+    )
+
+    created = client.post("/v1/conversations", json={"model_default": f"bedrock/{profile_arn}"})
+    conversation_id = created.json()["conversation_id"]
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        json={"role": "user", "content": "hi"},
+    )
+
+    assert response.status_code == 200
+    assert captured["kwargs"]["model"] == f"bedrock/converse/{profile_arn}"
+    assert captured["kwargs"]["metadata"]["prism"]["provider"] == "bedrock"
+
+
+def test_chatbot_leaves_explicit_bedrock_converse_models_unchanged(chatbot_client) -> None:
+    client, _, captured = chatbot_client
+    model = (
+        "bedrock/converse/"
+        "arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/hnxtndg2c380"
+    )
+
+    created = client.post("/v1/conversations", json={"model_default": model})
+    conversation_id = created.json()["conversation_id"]
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        json={"role": "user", "content": "hi"},
+    )
+
+    assert response.status_code == 200
+    assert captured["kwargs"]["model"] == model
+    assert captured["kwargs"]["metadata"]["prism"]["provider"] == "bedrock"
 
 
 def test_chatbot_does_not_persist_assistant_row_on_stream_failure(monkeypatch) -> None:

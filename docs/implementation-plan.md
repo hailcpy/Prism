@@ -408,7 +408,7 @@ Originally three phases; collapsed because the ADR-0011 pivot to a LiteLLM callb
 - [x] `metrics-reconciler` (out-of-band): periodic catchup pass over `inference_logs` (window 15min, default interval 5min) replacing rollup rows via a single SQL.
 - [x] `GET /v1/metrics?from=&to=&model=&provider=` endpoint on chatbot-api reading via `LogStore.get_metrics`.
 - [x] Dashboard page at `/metrics`: line charts for latency p50/p95, throughput, error rate, token usage; filter by model/provider; auto-refresh every 15s.
-- [ ] Smoke test: drive chat traffic, observe rollup rows appear within 60s, dashboard updates (run with `make up` once provider keys are set).
+- [x] Smoke test: drive chat traffic, observe rollup rows appear within 60s, dashboard updates (run with `make up` once provider keys are set).
 - **Demoable:** dashboard shows live activity as you chat.
 
 ### Phase 7 — Strands agent runtime + tool hooks (1 day)

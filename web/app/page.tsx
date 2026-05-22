@@ -74,17 +74,17 @@ const models = [
   {
     label: "Custom Sonnet (Bedrock profile)",
     value:
-      "bedrock/arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/hnxtndg2c380",
+      "bedrock/converse/arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/hnxtndg2c380",
   },
   {
     label: "Custom Opus (Bedrock profile)",
     value:
-      "bedrock/arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/l4phmjq3xd8t",
+      "bedrock/converse/arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/l4phmjq3xd8t",
   },
   {
     label: "Custom Haiku (Bedrock profile)",
     value:
-      "bedrock/arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/ge5qern21zg5",
+      "bedrock/converse/arn:aws:bedrock:us-west-2:823998119176:application-inference-profile/ge5qern21zg5",
   },
   {
     label: "Claude Sonnet 4.5 (Bedrock)",

@@ -121,6 +121,29 @@ def test_window_aggregator_separates_keys() -> None:
     assert rows_by_model["gpt-4o"].error_count == 0
 
 
+def test_window_aggregator_dedupes_reclaimed_stream_messages() -> None:
+    bucket = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
+    agg = WindowAggregator(grace_seconds=0)
+    event = _event(
+        inference_id="00000000-0000-7000-8000-000000000001",
+        bucket=bucket,
+        model="bedrock/converse/arn:aws:bedrock:us-west-2:123:application-inference-profile/p",
+        provider="bedrock",
+        latency_ms=250,
+    )
+
+    agg.add("redis-id-1", event)
+    agg.add("redis-id-1", event)
+    agg.add("redis-id-1", event)
+
+    rows, ack_ids = agg.close_due(bucket + timedelta(seconds=120))
+
+    assert ack_ids == ["redis-id-1"]
+    assert len(rows) == 1
+    assert rows[0].count == 1
+    assert rows[0].prompt_tokens_sum == 10
+
+
 def test_ingest_messages_skips_invalid() -> None:
     bucket = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
     valid_event = _event(inference_id="00000000-0000-7000-8000-000000000001", bucket=bucket)

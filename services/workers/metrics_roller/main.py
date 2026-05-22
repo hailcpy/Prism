@@ -89,11 +89,15 @@ class WindowAggregator:
         self._window = timedelta(seconds=window_seconds)
         self._grace = timedelta(seconds=grace_seconds)
         self._buckets: dict[tuple[datetime, str, str], _WindowBucket] = {}
-        self._message_ids: dict[datetime, list[str]] = {}
+        self._message_ids: dict[datetime, dict[str, None]] = {}
 
     def add(self, message_id: str, event: InferenceEvent) -> None:
         ts = event.created_at or event.ts_end
         bucket_key = _floor_minute(ts)
+        message_ids = self._message_ids.setdefault(bucket_key, {})
+        if message_id in message_ids:
+            return
+        message_ids[message_id] = None
         composite = (bucket_key, event.model, event.provider)
         bucket = self._buckets.get(composite)
         if bucket is None:
@@ -102,7 +106,6 @@ class WindowAggregator:
             )
             self._buckets[composite] = bucket
         bucket.add(event)
-        self._message_ids.setdefault(bucket_key, []).append(message_id)
 
     def close_due(self, now: datetime) -> tuple[list[MetricsRow], list[str]]:
         cutoff = now - self._window - self._grace
@@ -115,7 +118,7 @@ class WindowAggregator:
             for composite in list(self._buckets):
                 if composite[0] == bucket_key:
                     rows.append(self._buckets.pop(composite).to_row())
-            ack_ids.extend(self._message_ids.pop(bucket_key))
+            ack_ids.extend(self._message_ids.pop(bucket_key).keys())
         return rows, ack_ids
 
     def flush_all(self) -> tuple[list[MetricsRow], list[str]]:
