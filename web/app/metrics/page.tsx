@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 
 type Bucket = {
   minute_bucket: string;
@@ -13,6 +12,7 @@ type Bucket = {
   latency_p95_ms: number;
   prompt_tokens_sum: number;
   completion_tokens_sum: number;
+  cost_usd_sum: number;
 };
 
 type Series = {
@@ -99,11 +99,13 @@ export default function MetricsPage() {
     let errors = 0;
     let prompt = 0;
     let completion = 0;
+    let cost = 0;
     for (const bucket of buckets) {
       count += bucket.count;
       errors += bucket.error_count;
       prompt += bucket.prompt_tokens_sum;
       completion += bucket.completion_tokens_sum;
+      cost += bucket.cost_usd_sum ?? 0;
     }
     return {
       count,
@@ -111,6 +113,7 @@ export default function MetricsPage() {
       errorRate: count > 0 ? (errors / count) * 100 : 0,
       prompt,
       completion,
+      cost,
     };
   }, [buckets]);
 
@@ -133,9 +136,6 @@ export default function MetricsPage() {
     <main className="max-w-6xl mx-auto p-4 md:p-8 space-y-8 min-h-[calc(100vh-56px)] bg-mesh-light dark:bg-mesh-dark text-zinc-900 dark:text-zinc-100">
       <header className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-8 border-b border-black/10 dark:border-white/10 pb-6">
         <div>
-          <div className="flex items-center gap-4 text-sm font-semibold mb-4">
-            <Link href="/" className="text-[#009f8f] hover:text-[#0b6b75] dark:text-[#ff6d4d] dark:hover:text-[#ff8f75] transition-colors">← Chat</Link>
-          </div>
           <h1 className="text-3xl font-bold mb-1">Prism — Metrics</h1>
           <div className="text-sm text-zinc-500 dark:text-zinc-400 font-medium">
             {error ? (
@@ -195,8 +195,8 @@ export default function MetricsPage() {
               ))}
             </select>
           </label>
-          <button 
-            type="button" 
+          <button
+            type="button"
             onClick={() => void load()}
             className="px-4 py-1.5 h-[34px] rounded-lg bg-zinc-200 dark:bg-zinc-700 text-sm font-semibold hover:bg-zinc-300 dark:hover:bg-zinc-600 transition-colors"
           >
@@ -205,7 +205,12 @@ export default function MetricsPage() {
         </div>
       </header>
 
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      <section className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+        <SummaryCard
+          label="Cost (USD)"
+          value={formatCost(totals.cost)}
+          accent
+        />
         <SummaryCard label="Calls" value={totals.count.toLocaleString()} />
         <SummaryCard label="Errors" value={totals.errors.toLocaleString()} />
         <SummaryCard
@@ -224,56 +229,95 @@ export default function MetricsPage() {
 
       <section className="grid md:grid-cols-2 gap-6">
         <Chart
-          title="Latency p50 (ms)"
+          title="Cost over time"
+          series={buildSeries((b) => b.cost_usd_sum ?? 0)}
+          yLabel="USD"
+          formatY={(v) => formatCost(v)}
+        />
+        <Chart
+          title="Latency p50"
           series={buildSeries((b) => b.latency_p50_ms)}
           yLabel="ms"
         />
         <Chart
-          title="Latency p95 (ms)"
+          title="Latency p95"
           series={buildSeries((b) => b.latency_p95_ms)}
           yLabel="ms"
         />
         <Chart
-          title="Throughput (calls / min)"
+          title="Throughput"
           series={buildSeries((b) => b.count)}
-          yLabel="calls"
+          yLabel="calls / min"
         />
         <Chart
-          title="Error rate (%)"
+          title="Error rate"
           series={buildSeries((b) =>
             b.count > 0 ? (b.error_count / b.count) * 100 : 0,
           )}
           yLabel="%"
         />
         <Chart
-          title="Tokens / min"
+          title="Tokens"
           series={buildSeries(
             (b) => b.prompt_tokens_sum + b.completion_tokens_sum,
           )}
-          yLabel="tokens"
+          yLabel="tokens / min"
         />
       </section>
     </main>
   );
 }
 
-function SummaryCard({ label, value }: { label: string; value: string }) {
+function SummaryCard({
+  label,
+  value,
+  accent = false,
+}: {
+  label: string;
+  value: string;
+  accent?: boolean;
+}) {
   return (
-    <div className="bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md p-5 rounded-2xl border border-black/5 dark:border-white/5 shadow-sm text-center">
-      <div className="text-[11px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2">{label}</div>
-      <div className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">{value}</div>
+    <div
+      className={`p-5 rounded-2xl border shadow-sm text-center backdrop-blur-md ${
+        accent
+          ? "bg-gradient-to-br from-[#ff6d4d]/10 to-[#2453ff]/10 border-[#009f8f]/30"
+          : "bg-white/60 dark:bg-zinc-900/60 border-black/5 dark:border-white/5"
+      }`}
+    >
+      <div className="text-[11px] font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2">
+        {label}
+      </div>
+      <div
+        className={`text-2xl font-bold ${
+          accent
+            ? "bg-gradient-to-br from-[#ff6d4d] to-[#2453ff] bg-clip-text text-transparent"
+            : "text-zinc-900 dark:text-zinc-100"
+        }`}
+      >
+        {value}
+      </div>
     </div>
   );
+}
+
+function formatCost(value: number): string {
+  if (!Number.isFinite(value) || value === 0) return "$0.00";
+  if (value >= 100) return `$${value.toFixed(0)}`;
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  return `$${value.toFixed(4)}`;
 }
 
 function Chart({
   title,
   series,
   yLabel,
+  formatY,
 }: {
   title: string;
   series: Series[];
   yLabel: string;
+  formatY?: (v: number) => string;
 }) {
   const allPoints = series.flatMap((s) => s.points);
   const empty = allPoints.length === 0;
@@ -288,7 +332,7 @@ function Chart({
 
   const width = 480;
   const height = 200;
-  const padding = { top: 16, right: 16, bottom: 28, left: 44 };
+  const padding = { top: 16, right: 16, bottom: 28, left: 56 };
   const innerW = width - padding.left - padding.right;
   const innerH = height - padding.top - padding.bottom;
 
@@ -301,8 +345,18 @@ function Chart({
 
   return (
     <div className="bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md p-6 rounded-2xl border border-black/5 dark:border-white/5 shadow-sm flex flex-col">
-      <h2 className="text-sm font-bold mb-4">{title}</h2>
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title} className="w-full h-auto drop-shadow-sm">
+      <div className="flex items-baseline justify-between mb-4">
+        <h2 className="text-sm font-bold">{title}</h2>
+        <span className="text-[10px] font-bold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest">
+          {yLabel}
+        </span>
+      </div>
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label={title}
+        className="w-full h-auto drop-shadow-sm"
+      >
         <rect
           x={padding.left}
           y={padding.top}
@@ -310,6 +364,16 @@ function Chart({
           height={innerH}
           fill="transparent"
         />
+        <text
+          x={12}
+          y={padding.top + innerH / 2}
+          fontSize="10"
+          textAnchor="middle"
+          transform={`rotate(-90 12 ${padding.top + innerH / 2})`}
+          className="fill-zinc-500 dark:fill-zinc-400 font-semibold uppercase tracking-wider"
+        >
+          {yLabel}
+        </text>
         {[0, 0.25, 0.5, 0.75, 1].map((t) => {
           const yVal = yMin + (yMax - yMin) * (1 - t);
           const yPx = padding.top + innerH * t;
@@ -329,14 +393,19 @@ function Chart({
                 fontSize="10"
                 className="fill-zinc-500"
               >
-                {formatNumber(yVal)}
+                {formatY ? formatY(yVal) : formatNumber(yVal)}
               </text>
             </g>
           );
         })}
         {!empty && (
           <>
-            <text x={padding.left} y={height - 8} fontSize="10" className="fill-zinc-400">
+            <text
+              x={padding.left}
+              y={height - 8}
+              fontSize="10"
+              className="fill-zinc-400"
+            >
               {new Date(xMin).toLocaleTimeString()}
             </text>
             <text
@@ -360,7 +429,13 @@ function Chart({
             .join(" ");
           return (
             <g key={s.key}>
-              <path d={d} stroke={s.color} fill="none" strokeWidth={2.5} className="drop-shadow-sm" />
+              <path
+                d={d}
+                stroke={s.color}
+                fill="none"
+                strokeWidth={2.5}
+                className="drop-shadow-sm"
+              />
               {s.points.map((p, i) => (
                 <circle
                   key={i}
@@ -371,7 +446,7 @@ function Chart({
                   className="stroke-white dark:stroke-zinc-900"
                   strokeWidth="1.5"
                 >
-                  <title>{`${s.key} @ ${new Date(p.x).toLocaleTimeString()}: ${formatNumber(p.y)} ${yLabel}`}</title>
+                  <title>{`${s.key} @ ${new Date(p.x).toLocaleTimeString()}: ${formatY ? formatY(p.y) : formatNumber(p.y)} ${yLabel}`}</title>
                 </circle>
               ))}
             </g>
@@ -391,7 +466,10 @@ function Chart({
       </svg>
       <div className="mt-6 flex flex-wrap gap-4 text-xs font-semibold">
         {series.map((s) => (
-          <span key={s.key} className="flex items-center gap-2 text-zinc-700 dark:text-zinc-300">
+          <span
+            key={s.key}
+            className="flex items-center gap-2 text-zinc-700 dark:text-zinc-300"
+          >
             <span
               className="w-3 h-3 rounded-full shadow-inner"
               style={{ background: s.color }}
