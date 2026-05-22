@@ -38,7 +38,9 @@ docs/
     ├── 0007-streaming-final-event-logging.md
     ├── 0008-conversation-message-log-three-table-split.md
     ├── 0009-fire-and-forget-sdk-emission-with-bounded-queue.md
-    └── 0010-metrics-rollup-via-consumer-not-query-time.md
+    ├── 0010-metrics-rollup-via-consumer-not-query-time.md
+    ├── 0011-sdk-as-litellm-callback-supersedes-0004.md
+    └── 0012-strands-tool-hooks.md
 ```
 
 ADR format follows the standard Michael Nygard template: **Status, Context, Decision, Consequences**. Each ADR is short (one page max). The point isn't ceremony — it's that future-you (or a reviewer) can read why a choice was made without re-deriving the tradeoff from code.
@@ -114,51 +116,66 @@ Five processes, all Python except the chatbot UI:
 
 ## 4. SDK public API design
 
-`prism-sdk` is a thin Python package. The whole point is that the chatbot imports *this*, never `litellm` or provider SDKs directly.
+`prism-sdk` is a thin Python package built around a **LiteLLM callback** (see **ADR-0011**, which supersedes ADR-0004). The caller still imports `prism_sdk`, but it never wraps the LLM call site — instead it installs a `PrismCallback` on `litellm.callbacks` and the caller invokes `litellm.completion(...)` directly. This is the only way to intercept LLM turns inside an agent runtime (e.g. Strands) that owns the call site.
 
 ### Surface
 
 ```python
-from prism_sdk import PrismClient
+import litellm
+from prism_sdk import PrismClient, metadata as prism_metadata
 
 client = PrismClient(
     ingestion_url="http://ingestion:8001",
-    api_key=None,                 # not used in takehome, reserved for future
-    sink="http",                  # "http" | "noop" | "stdout" (testing)
+    sink="http",                  # "http" | "noop" | "stdout"
     flush_interval_ms=200,
     queue_max=10_000,
-    on_drop="log",                # "log" | "raise"
+    on_drop="log",
 )
+client.install()                  # registers PrismCallback on litellm.callbacks
 
 # Non-streaming
-resp = client.chat.completions.create(
-    model="gpt-4o",               # passed straight to LiteLLM, multi-provider for free
+resp = litellm.completion(
+    model="gpt-4o",
     messages=[...],
-    conversation_id="...",        # required — links inference to message
-    message_id="...",             # required — links inference to message
-    metadata={"user_id": "..."},  # arbitrary tags, indexed loosely
+    metadata=prism_metadata(
+        conversation_id="...",
+        message_id="...",
+    ),
 )
 
-# Streaming
-async for chunk in client.chat.completions.stream(...):
+# Streaming — same call, just stream=True
+stream = await litellm.acompletion(
+    model="gpt-4o",
+    messages=[...],
+    stream=True,
+    stream_options={"include_usage": True},
+    metadata=prism_metadata(conversation_id="...", message_id="..."),
+)
+async for chunk in stream:
     yield chunk
-# SDK emits ONE inference_log at stream completion, with TTFT + total latency.
+# PrismCallback fires log_success_event ONCE at stream completion with
+# response_obj.usage populated and kwargs["completion_start_time"] for TTFT.
 ```
 
 ### Internal flow (per call)
 
-1. Generate `inference_id` (uuid7 for time-orderable).
-2. Start monotonic timer; capture `ts_start`.
-3. Call LiteLLM; capture `ts_first_token` if streaming.
-4. On success: capture tokens (LiteLLM exposes `usage`), response preview (first 500 chars).
-5. On error: capture exception type, message, provider-side error code if available.
-6. Build `InferenceEvent` (see API contracts §7).
-7. Push onto in-memory bounded queue. **Never block the caller.**
-8. Background flusher thread POSTs batches to ingestion every `flush_interval_ms` or when batch hits 100 events.
-9. If queue full → drop oldest + record `on_drop` action. (Logs are observability — never sacrifice user latency for them.)
+1. LiteLLM finishes the call (success or failure) and invokes `PrismCallback.log_success_event` / `log_failure_event` with `kwargs`, `response_obj`, `start_time`, `end_time`.
+2. Callback reads the `metadata.prism` namespace to recover correlation IDs.
+3. Builds one `InferenceEvent`:
+   - `latency_ms` from `end_time - start_time`.
+   - `ttft_ms` from `kwargs["completion_start_time"] - start_time` when present.
+   - `usage` from `response_obj.usage`.
+   - `prompt_preview` from last user message; `response_preview` from `choices[0].message.content`.
+   - `error` from `kwargs["exception"]` on failure paths.
+4. Pushes onto `PrismClient`'s in-memory bounded queue. **Never blocks the caller.**
+5. Background flusher thread POSTs batches to ingestion every `flush_interval_ms` or 100 events.
+6. If queue full → drop oldest + record `on_drop` action.
 
-### Why a wrapper instead of LiteLLM's callback hook
-LiteLLM has `success_callback` / `failure_callback` hooks. Using them would hide the implementation. We deliberately wrap so the reviewer sees latency capture, error capture, payload extraction, and emission as explicit code in our SDK. See **ADR-0004**.
+### Why a callback instead of a call-site wrapper
+A wrapper requires callers to invoke `client.chat.completions.create(...)`. Agent runtimes (Strands `LiteLLMModel`) own the call site and bypass wrappers. The brief explicitly sanctions "SDK, middleware, OR wrapper." Reviewer visibility is preserved by keeping `PrismCallback` small and explicit in one file. See **ADR-0011**.
+
+### Tool calls (agent loops)
+`PrismCallback` fires per LLM turn, not per tool execution. Tool traces are captured by a separate `prism_sdk.strands` adapter that subscribes to Strands hooks and pushes `ToolInvocationEvent`s onto the same queue. See **ADR-0012** (Proposed; deferred to a later phase).
 
 ---
 
@@ -331,6 +348,8 @@ Make targets: `make up`, `make down`, `make logs`, `make seed`, `make test`, `ma
 | Streaming responses + logging race | Log is emitted **only on stream completion** with TTFT + total latency. Cancelled streams emit a `status: cancelled` log. See ADR-0007. | Mid-stream telemetry is not logged per-token (would be overkill). |
 | Schema drift between SDK and ingestion | `schema_version` in event, Pydantic on ingestion side strict on required fields, lenient on additional | Forward-compat: old SDKs work; back-compat: old ingestion ignores new fields. |
 | Provider SDK quirks (token counting differences) | LiteLLM normalizes `usage`. Where it can't, we record `null` rather than guessing. | Some completion_tokens may be missing for niche providers; surfaced in dashboard as "unknown". |
+| Coupling to LiteLLM callback timing / field semantics (ADR-0011) | Integration tests pin the fields we depend on (`completion_start_time`, `response_obj.usage`, `response_obj.choices[0].message.content`). | If LiteLLM changes callback contract, we get a test failure rather than silent data loss. |
+| Strands runtime coupling once Phase 7 lands (ADR-0012) | `prism_sdk.strands` is an optional submodule; nothing breaks if Strands isn't installed. | Tool capture only works under Strands; another runtime would need its own adapter. |
 
 ---
 
@@ -339,13 +358,15 @@ Make targets: `make up`, `make down`, `make logs`, `make seed`, `make test`, `ma
 1. **ADR-0001** — Python everywhere (FastAPI + LiteLLM). Why not Node.
 2. **ADR-0002** — Single Postgres, with `raw_payload_uri` column + `LogStore` interface to enable PG+CH+S3 split later.
 3. **ADR-0003** — Redis Streams as event bus (not Kafka/SQS). Why.
-4. **ADR-0004** — SDK is a thin wrapper around LiteLLM, **not** a LiteLLM callback. Visibility of instrumentation is a feature.
+4. **ADR-0004** — ~~SDK is a thin wrapper around LiteLLM~~. **Superseded by ADR-0011.**
 5. **ADR-0005** — `LogStore` / `RawPayloadStore` / `Bus` interfaces are required from day one. No direct DB calls from API/worker logic.
 6. **ADR-0006** — PII redaction happens at ingestion API boundary, not in SDK and not in workers. Single trust boundary.
 7. **ADR-0007** — Streaming responses log **once at completion**, including TTFT, total latency, and final status (ok/error/cancelled). No per-token events.
 8. **ADR-0008** — Three table groups (app / logs / rollups) with no DB-level FKs between groups. Enables clean migration of any group.
 9. **ADR-0009** — SDK is fire-and-forget with a bounded queue; on overflow, drop oldest. User latency is never sacrificed for logs.
 10. **ADR-0010** — Dashboard reads pre-aggregated `metrics_minute`, populated by a dedicated `metrics-roller` consumer. Query-time aggregation is explicitly rejected.
+11. **ADR-0011** — SDK captures via a LiteLLM `CustomLogger` callback, not a call-site wrapper. Enables transparent capture inside agent runtimes (Strands) that own the LLM call site.
+12. **ADR-0012** *(Proposed)* — Tool-call traces via Strands hooks (`prism_sdk.strands.PrismStrandsHooks`). Introduces a `ToolInvocationEvent` event type and a `tool_invocations` table. Deferred to a later phase.
 
 ---
 
@@ -353,60 +374,64 @@ Make targets: `make up`, `make down`, `make logs`, `make seed`, `make test`, `ma
 
 Each phase ends with something demonstrable. Don't skip the demo step — it forces integration.
 
-### Phase 0 — Repo + docs scaffold (½ day)
-- [ ] Create repo structure (`/sdk`, `/services/chatbot-api`, `/services/ingestion-api`, `/services/workers`, `/web`, `/docs`, `/infra`).
-- [ ] Write all 10 ADRs as one-pagers (skeleton with Decision + Consequences).
-- [ ] Write `docs/architecture.md`, `docs/api-contracts.md`, `docs/schema.md`, `docs/risks-and-tradeoffs.md`, `docs/runbook.md` from this plan.
-- [ ] Docker Compose skeleton with empty service containers that boot.
-- **Demoable:** `docker compose up` shows all services healthy.
+### Phase 0 — Repo + docs scaffold (½ day) ✅
+- [x] Repo structure (`/sdk`, `/services/chatbot-api`, `/services/ingestion-api`, `/services/workers`, `/web`, `/docs`, `/infra`).
+- [x] All ADRs (0001–0010) written as one-pagers.
+- [x] `docs/architecture.md`, `docs/api-contracts.md`, `docs/schema.md`, `docs/risks-and-tradeoffs.md`, `docs/runbook.md`.
+- [x] Docker Compose skeleton.
 
-### Phase 1 — Storage foundation (½ day)
-- [ ] Postgres init SQL: three table groups, partition function, indexes.
-- [ ] Daily partition cron container.
-- [ ] `LogStore` / `RawPayloadStore` / `Bus` interfaces defined. `PostgresLogStore`, `LocalRawPayloadStore`, `RedisStreamsBus` impls.
-- [ ] Smoke tests for each interface.
-- **Demoable:** psql into Postgres, see tables; tests pass.
+### Phase 1 — Storage foundation (½ day) ✅
+- [x] Postgres init SQL: three table groups, partition function, indexes (`infra/sql/init.sql`).
+- [x] Daily partition cron container.
+- [x] `LogStore` / `RawPayloadStore` / `Bus` interfaces + Postgres/Local/Redis impls.
+- [x] Smoke tests.
 
-### Phase 2 — Ingestion API + log-writer worker (1 day)
-- [ ] `POST /v1/events:batch` with Pydantic validation.
-- [ ] PII redaction module (email/phone/SSN/credit-card regexes).
-- [ ] Publish to Redis Streams.
-- [ ] `log-writer` worker: consume, batch, insert.
-- [ ] curl-driven integration test: post 100 events → see them in `inference_logs`.
-- **Demoable:** end-to-end log flow without a chatbot.
+### Phase 2 — Ingestion API + log-writer worker (1 day) ✅
+- [x] `POST /v1/events:batch` with Pydantic validation.
+- [x] PII redaction at the ingestion boundary.
+- [x] Publish to Redis Streams.
+- [x] `log-writer` worker: consume, batch, insert.
 
-### Phase 3 — SDK (1 day)
-- [ ] `PrismClient` with `chat.completions.create` (non-streaming first).
-- [ ] LiteLLM call, metadata capture, fire-and-forget queue + flusher.
-- [ ] Unit tests with `sink="noop"` and mocked LiteLLM.
-- [ ] Integration test against running ingestion.
-- **Demoable:** a tiny Python script calls OpenAI + Anthropic + Gemini, dashboard query shows all 3.
+### Phase 3 + 4 + 5 — SDK + Chatbot (API + UI) + Streaming (combined) ✅
+Originally three phases; collapsed because the ADR-0011 pivot to a LiteLLM callback removed the separate streaming surface and folded the SDK rework into the chatbot delivery.
 
-### Phase 4 — Chatbot (API + UI) non-streaming (1 day)
-- [ ] FastAPI service with conversations + messages endpoints.
-- [ ] Next.js UI: model selector, send message, render history.
-- [ ] Wires through prism-sdk on every LLM call.
-- **Demoable:** real chat session, with logs landing in DB.
+- [x] `PrismClient` + `PrismCallback` (LiteLLM `CustomLogger`); `metadata()` correlation helper.
+- [x] Fire-and-forget bounded queue + flusher; `sink` modes `http`/`noop`/`stdout`.
+- [x] Chatbot API: `POST /v1/conversations`, `GET /v1/conversations/:id/messages`, `POST /v1/conversations/:id/messages` (SSE), all calling `litellm.acompletion(stream=True, ...)` directly.
+- [x] Next.js UI: model selector, message send, history, token-by-token render via SSE.
+- [x] ADR-0011 (Accepted) + ADR-0012 (Proposed) committed.
+- **Demoable:** real streaming chat session, one `inference_log` row per assistant message with TTFT + total latency.
 
-### Phase 5 — Streaming (½ day)
-- [ ] SDK streaming path with TTFT capture + single completion event.
-- [ ] Chatbot API SSE endpoint.
-- [ ] UI token-by-token render.
-- **Demoable:** streaming chat with one log row per response showing TTFT and total latency.
+### Phase 6 — metrics-roller + dashboard (1 day) ← **NEXT**
+Workers and dashboard route are scaffolded as stubs (`services/workers/metrics_roller/`, `services/workers/metrics_reconciler/`, `web/app/metrics/`); none of them are wired up.
 
-### Phase 6 — metrics-roller + dashboard (1 day)
-- [ ] `metrics-roller` worker, 60s windows, idempotent upsert.
-- [ ] `GET /v1/metrics` endpoint.
-- [ ] Dashboard page: line charts for latency p50/p95, throughput, error rate, token usage. Filter by model/provider.
+- [ ] `metrics-roller` worker: second consumer group `cg-roller` on `inference.logged`, 60s tumbling window keyed by `(model, provider)`, idempotent `UPSERT` into `metrics_minute`.
+- [ ] `metrics-reconciler` (out-of-band): periodic catchup pass over `inference_logs` for any minute buckets the roller missed (worker restart, late events).
+- [ ] `GET /v1/metrics?from=&to=&model=&provider=` endpoint (on chatbot-api or a dedicated read service — pick one, document in an ADR if it's not chatbot-api).
+- [ ] Dashboard page at `/metrics`: line charts for latency p50/p95, throughput, error rate, token usage; filter by model/provider; auto-refresh.
+- [ ] Smoke test: drive chat traffic, observe rollup rows appear within 60s, dashboard updates.
 - **Demoable:** dashboard shows live activity as you chat.
 
-### Phase 7 — Polish + submission (½ day)
+### Phase 7 — Strands agent runtime + tool hooks (1 day)
+Moves chatbot-api off direct `litellm.acompletion` to a Strands agent loop. Implements ADR-0012 (promotes it from Proposed → Accepted on completion).
+
+- [ ] Replace the `litellm.acompletion` call in `services/chatbot-api/chatbot_api/main.py` with a Strands `Agent` using `LiteLLMModel`. The existing `PrismCallback` continues to capture LLM turns transparently.
+- [ ] Define one or two demo tools (e.g. `now`, `web_search` stub) to exercise the tool path end-to-end.
+- [ ] `prism_sdk.strands.PrismStrandsHooks`: subscribes to `BeforeToolInvocation` / `AfterToolInvocation`, builds `ToolInvocationEvent`, enqueues onto the same `PrismClient` queue.
+- [ ] Ingestion: extend `/v1/events:batch` to accept both event types, discriminated by `event_type`. Apply redaction to `arguments_preview` / `result_preview`.
+- [ ] Storage: new `tool_invocations` table (partitioned same as `inference_logs`); `LogStore` gains a `write_tool_events_batch`. Soft FK to `inference_logs.id`.
+- [ ] `log-writer` worker routes by event_type.
+- [ ] Resolve the open questions in ADR-0012 (inference_id propagation, large tool-result handling).
+- [ ] Update ADR-0012 status to **Accepted** with the resolutions inline.
+- **Demoable:** chat triggers a tool call; both an `inference_log` row and a correlated `tool_invocations` row land in DB.
+
+### Phase 8 — Polish + submission (½ day)
 - [ ] README: setup, architecture overview, schema decisions, tradeoffs, future improvements.
-- [ ] Loom demo: chat → log appears → dashboard updates → kill ingestion → see SDK queue resilience → restart → drains.
+- [ ] Loom demo: chat → log appears → dashboard updates → tool call → tool row appears → kill ingestion → SDK queue resilience → restart → drains.
 - [ ] Final pass on all ADRs (any decision that changed during build).
 - [ ] Submit to work@ollive.ai.
 
-**Total estimate:** ~5.5 working days. Buffer of ~1 day for the things that will inevitably bite (LiteLLM streaming quirks per provider, partition edge cases, Docker networking on Mac).
+**Estimate remaining from here:** ~2.5 working days (Phase 6: 1d, Phase 7: 1d, Phase 8: ½d). If Phase 7 slips (Strands streaming + LiteLLM callback edge cases, tool schema), descope to "tool capture without Strands runtime swap" — keep direct `litellm.acompletion`, drop in a manual tool-invocation emission for one demo tool.
 
 ---
 
