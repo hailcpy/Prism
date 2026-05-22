@@ -6,18 +6,20 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol, cast
 
 import litellm
 import psycopg
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
 import prism_sdk
+from prism_infra.models import MetricsQuery
+from prism_infra.storage import LogStore, PostgresLogStore
 from prism_sdk import PrismClient
 
 MessageRole = Literal["user", "assistant", "system"]
@@ -219,6 +221,7 @@ app.add_middleware(
 )
 app.state.chat_store = None
 app.state.prism_client = None
+app.state.log_store = None
 
 
 @app.get("/healthz")
@@ -387,6 +390,71 @@ def _get_store(app: FastAPI) -> ChatStore:
     if app.state.chat_store is None:
         app.state.chat_store = PostgresChatStore(os.environ["DATABASE_URL"])
     return app.state.chat_store
+
+
+class MetricsBucket(BaseModel):
+    minute_bucket: datetime
+    model: str
+    provider: str
+    count: int
+    error_count: int
+    latency_p50_ms: int
+    latency_p95_ms: int
+    prompt_tokens_sum: int
+    completion_tokens_sum: int
+
+
+class MetricsResponse(BaseModel):
+    buckets: list[MetricsBucket]
+
+
+@app.get("/v1/metrics", response_model=MetricsResponse)
+def get_metrics(
+    request: Request,
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = Query(default=None),
+    model: list[str] | None = Query(default=None),
+    provider: list[str] | None = Query(default=None),
+    interval: str = Query(default="1m"),
+) -> MetricsResponse:
+    if interval != "1m":
+        raise HTTPException(status_code=400, detail="only interval=1m is supported")
+    end = to or datetime.now(UTC)
+    start = from_ or end - timedelta(hours=1)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=UTC)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=UTC)
+    rows = _get_log_store(request.app).get_metrics(
+        MetricsQuery(
+            start=start,
+            end=end,
+            models=tuple(model or ()),
+            providers=tuple(provider or ()),
+        )
+    )
+    return MetricsResponse(
+        buckets=[
+            MetricsBucket(
+                minute_bucket=row.minute_bucket,
+                model=row.model,
+                provider=row.provider,
+                count=row.count,
+                error_count=row.error_count,
+                latency_p50_ms=row.latency_p50_ms,
+                latency_p95_ms=row.latency_p95_ms,
+                prompt_tokens_sum=row.prompt_tokens_sum,
+                completion_tokens_sum=row.completion_tokens_sum,
+            )
+            for row in rows
+        ]
+    )
+
+
+def _get_log_store(app: FastAPI) -> LogStore:
+    if app.state.log_store is None:
+        app.state.log_store = PostgresLogStore(os.environ["DATABASE_URL"])
+    return app.state.log_store
 
 
 def _get_prism_client(app: FastAPI) -> PrismClient:

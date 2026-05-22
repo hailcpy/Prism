@@ -71,6 +71,14 @@ const models = [
   { label: "GPT-4o", value: "gpt-4o" },
   { label: "Claude Sonnet", value: "claude-3-5-sonnet-latest" },
   { label: "Gemini 1.5 Flash", value: "gemini/gemini-1.5-flash" },
+  {
+    label: "Claude 3.5 Sonnet (Bedrock)",
+    value: "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
+  },
+  {
+    label: "Claude 3 Haiku (Bedrock)",
+    value: "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+  },
 ];
 
 export default function Home() {

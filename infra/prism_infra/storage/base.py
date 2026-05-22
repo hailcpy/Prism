@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Protocol
 
 from prism_infra.models import InferenceEvent, LogsQuery, MetricsQuery, MetricsRow
@@ -13,6 +14,8 @@ class LogStore(Protocol):
     def get_metrics(self, query: MetricsQuery) -> list[MetricsRow]: ...
 
     def get_logs(self, query: LogsQuery) -> list[InferenceEvent]: ...
+
+    def reconcile_metrics(self, start: datetime, end: datetime) -> int: ...
 
 
 class RawPayloadStore(Protocol):

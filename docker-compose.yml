@@ -40,6 +40,9 @@ services:
       DATABASE_URL: postgres://prism:prism@postgres:5432/prism
       REDIS_URL: redis://redis:6379/0
       INGESTION_URL: http://ingestion-api:8001
+      AWS_ACCESS_KEY_ID: ${BEDROCK_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${BEDROCK_AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION_NAME: ${BEDROCK_AWS_REGION:-us-west-2}
     ports:
       - "8100:8000"
     depends_on:

@@ -402,14 +402,13 @@ Originally three phases; collapsed because the ADR-0011 pivot to a LiteLLM callb
 - [x] ADR-0011 (Accepted) + ADR-0012 (Proposed) committed.
 - **Demoable:** real streaming chat session, one `inference_log` row per assistant message with TTFT + total latency.
 
-### Phase 6 — metrics-roller + dashboard (1 day) ← **NEXT**
-Workers and dashboard route are scaffolded as stubs (`services/workers/metrics_roller/`, `services/workers/metrics_reconciler/`, `web/app/metrics/`); none of them are wired up.
+### Phase 6 — metrics-roller + dashboard (1 day) ✅
 
-- [ ] `metrics-roller` worker: second consumer group `cg-roller` on `inference.logged`, 60s tumbling window keyed by `(model, provider)`, idempotent `UPSERT` into `metrics_minute`.
-- [ ] `metrics-reconciler` (out-of-band): periodic catchup pass over `inference_logs` for any minute buckets the roller missed (worker restart, late events).
-- [ ] `GET /v1/metrics?from=&to=&model=&provider=` endpoint (on chatbot-api or a dedicated read service — pick one, document in an ADR if it's not chatbot-api).
-- [ ] Dashboard page at `/metrics`: line charts for latency p50/p95, throughput, error rate, token usage; filter by model/provider; auto-refresh.
-- [ ] Smoke test: drive chat traffic, observe rollup rows appear within 60s, dashboard updates.
+- [x] `metrics-roller` worker: second consumer group `cg-roller` on `inference.logged`, 60s tumbling window keyed by `(model, provider)`, idempotent REPLACE `UPSERT` into `metrics_minute`.
+- [x] `metrics-reconciler` (out-of-band): periodic catchup pass over `inference_logs` (window 15min, default interval 5min) replacing rollup rows via a single SQL.
+- [x] `GET /v1/metrics?from=&to=&model=&provider=` endpoint on chatbot-api reading via `LogStore.get_metrics`.
+- [x] Dashboard page at `/metrics`: line charts for latency p50/p95, throughput, error rate, token usage; filter by model/provider; auto-refresh every 15s.
+- [ ] Smoke test: drive chat traffic, observe rollup rows appear within 60s, dashboard updates (run with `make up` once provider keys are set).
 - **Demoable:** dashboard shows live activity as you chat.
 
 ### Phase 7 — Strands agent runtime + tool hooks (1 day)

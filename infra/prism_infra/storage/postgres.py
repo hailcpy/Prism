@@ -141,6 +141,47 @@ class PostgresLogStore:
             cur.execute(sql, params)
             return [self._row_to_event(row) for row in cur.fetchall()]
 
+    def reconcile_metrics(self, start: datetime, end: datetime) -> int:
+        """Recompute metrics_minute over [start, end) from inference_logs.
+
+        This is the canonical, idempotent rollup path (ADR-0010, Track 2).
+        Returns the number of rows upserted.
+        """
+        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO metrics_minute (
+                  minute_bucket, model, provider, count, error_count,
+                  latency_p50_ms, latency_p95_ms, prompt_tokens_sum,
+                  completion_tokens_sum
+                )
+                SELECT
+                  date_trunc('minute', created_at) AS minute_bucket,
+                  model,
+                  provider,
+                  count(*)::int AS count,
+                  count(*) FILTER (WHERE status <> 'ok')::int AS error_count,
+                  COALESCE(percentile_disc(0.50) WITHIN GROUP (ORDER BY latency_ms), 0)::int
+                    AS latency_p50_ms,
+                  COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::int
+                    AS latency_p95_ms,
+                  COALESCE(sum(prompt_tokens), 0)::bigint AS prompt_tokens_sum,
+                  COALESCE(sum(completion_tokens), 0)::bigint AS completion_tokens_sum
+                FROM inference_logs
+                WHERE created_at >= %(start)s AND created_at < %(end)s
+                GROUP BY 1, 2, 3
+                ON CONFLICT (minute_bucket, model, provider) DO UPDATE SET
+                  count = EXCLUDED.count,
+                  error_count = EXCLUDED.error_count,
+                  latency_p50_ms = EXCLUDED.latency_p50_ms,
+                  latency_p95_ms = EXCLUDED.latency_p95_ms,
+                  prompt_tokens_sum = EXCLUDED.prompt_tokens_sum,
+                  completion_tokens_sum = EXCLUDED.completion_tokens_sum
+                """,
+                {"start": start, "end": end},
+            )
+            return cur.rowcount
+
     def ensure_partitions(self, *, days_ahead: int = 1, retention_days: int = 30) -> None:
         with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
             cur.execute("SELECT ensure_inference_logs_partition(CURRENT_DATE)")

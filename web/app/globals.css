@@ -212,6 +212,132 @@ button {
   font-size: 13px;
 }
 
+.metrics-shell {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 28px;
+  display: grid;
+  gap: 24px;
+}
+
+.metrics-header h1 {
+  margin: 0 0 12px;
+  font-size: 22px;
+}
+
+.metrics-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: flex-end;
+}
+
+.metrics-controls label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: #59696f;
+}
+
+.metrics-controls select {
+  border: 1px solid #b9c9ce;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 7px 9px;
+  min-width: 160px;
+}
+
+.metrics-controls button {
+  border: 0;
+  border-radius: 6px;
+  background: #0b6b75;
+  color: #ffffff;
+  padding: 9px 14px;
+  font-weight: 650;
+}
+
+.metrics-status {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #59696f;
+}
+
+.metrics-error {
+  color: #8b3f24;
+}
+
+.metrics-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.metrics-card {
+  background: #ffffff;
+  border: 1px solid #d9e2e5;
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.metrics-card-label {
+  font-size: 12px;
+  color: #647176;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.metrics-card-value {
+  margin-top: 6px;
+  font-size: 22px;
+  font-weight: 650;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 18px;
+}
+
+.metrics-chart {
+  background: #ffffff;
+  border: 1px solid #d9e2e5;
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.metrics-chart h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: #233036;
+}
+
+.metrics-chart svg {
+  width: 100%;
+  height: auto;
+}
+
+.metrics-legend {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: #59696f;
+}
+
+.metrics-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.metrics-legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
 @media (max-width: 760px) {
   .app-shell {
     grid-template-columns: 1fr;

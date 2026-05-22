@@ -53,6 +53,18 @@ select = [
     "UP",
 ]
 
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Body",
+    "fastapi.Cookie",
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Header",
+    "fastapi.Path",
+    "fastapi.Query",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["infra"]

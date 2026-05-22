@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,25 @@ class InMemoryLogStore:
             and (not query.providers or row.provider in query.providers)
         ]
 
+    def reconcile_metrics(self, start: datetime, end: datetime) -> int:
+        buckets: dict[tuple[datetime, str, str], list[InferenceEvent]] = defaultdict(list)
+        for event in self.logs:
+            created = event.created_at
+            if created is None:
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=UTC)
+            if not (start <= created < end):
+                continue
+            bucket = created.astimezone(UTC).replace(second=0, microsecond=0)
+            buckets[(bucket, event.model, event.provider)].append(event)
+        rows = [
+            _build_metrics_row(bucket, model, provider, events)
+            for (bucket, model, provider), events in buckets.items()
+        ]
+        self.upsert_metrics(rows)
+        return len(rows)
+
     def get_logs(self, query: LogsQuery) -> list[InferenceEvent]:
         rows = [
             event
@@ -45,6 +66,31 @@ class InMemoryLogStore:
             and (query.status is None or event.status == query.status)
         ]
         return sorted(rows, key=lambda event: event.created_at, reverse=True)[: query.limit]
+
+
+def _build_metrics_row(
+    bucket: datetime, model: str, provider: str, events: list[InferenceEvent]
+) -> MetricsRow:
+    latencies = sorted(e.latency_ms for e in events)
+    n = len(latencies)
+
+    def pct(q: float) -> int:
+        if not latencies:
+            return 0
+        idx = max(0, min(n - 1, int(-(-n * q // 1)) - 1))
+        return latencies[idx]
+
+    return MetricsRow(
+        minute_bucket=bucket,
+        model=model,
+        provider=provider,
+        count=n,
+        error_count=sum(1 for e in events if e.status != "ok"),
+        latency_p50_ms=pct(0.50),
+        latency_p95_ms=pct(0.95),
+        prompt_tokens_sum=sum(e.usage.prompt_tokens or 0 for e in events),
+        completion_tokens_sum=sum(e.usage.completion_tokens or 0 for e in events),
+    )
 
 
 class JsonbRawPayloadStore:
