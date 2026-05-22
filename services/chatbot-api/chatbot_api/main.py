@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol, cast
 
+import boto3
+import httpx
 import litellm
 import psycopg
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -45,6 +47,7 @@ class Message:
     role: MessageRole
     content: str
     created_at: datetime
+    metadata: dict[str, Any] | None = None
 
 
 class ChatStore(Protocol):
@@ -58,9 +61,20 @@ class ChatStore(Protocol):
 
     def list_messages(self, conversation_id: str) -> list[Message]: ...
 
-    def create_message(self, conversation_id: str, role: MessageRole, content: str) -> Message: ...
+    def create_message(
+        self,
+        conversation_id: str,
+        role: MessageRole,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Message: ...
 
-    def update_message_content(self, message_id: str, content: str) -> Message: ...
+    def update_message_content(
+        self,
+        message_id: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Message: ...
 
     def delete_message(self, message_id: str) -> None: ...
 
@@ -68,8 +82,20 @@ class ChatStore(Protocol):
 class PostgresChatStore:
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
+        self._ensured_schema = False
+
+    def _ensure_schema(self) -> None:
+        if self._ensured_schema:
+            return
+        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            cur.execute(
+                "ALTER TABLE messages ADD COLUMN IF NOT EXISTS metadata_jsonb JSONB "
+                "NOT NULL DEFAULT '{}'::jsonb"
+            )
+        self._ensured_schema = True
 
     def create_conversation(self, model_default: str, system_prompt: str | None) -> Conversation:
+        self._ensure_schema()
         conversation_id = str(uuid.uuid4())
         with psycopg.connect(self.database_url) as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -86,6 +112,7 @@ class PostgresChatStore:
             return _conversation_from_row(row)
 
     def list_conversations(self, limit: int = 50) -> list[Conversation]:
+        self._ensure_schema()
         with psycopg.connect(self.database_url) as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
@@ -102,6 +129,7 @@ class PostgresChatStore:
             return [_conversation_from_row(row) for row in cur.fetchall()]
 
     def get_conversation(self, conversation_id: str) -> Conversation | None:
+        self._ensure_schema()
         with psycopg.connect(self.database_url) as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
@@ -116,10 +144,12 @@ class PostgresChatStore:
             return _conversation_from_row(row) if row else None
 
     def list_messages(self, conversation_id: str) -> list[Message]:
+        self._ensure_schema()
         with psycopg.connect(self.database_url) as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                SELECT id::text, conversation_id::text, role::text, content, created_at
+                SELECT id::text, conversation_id::text, role::text, content, created_at,
+                       metadata_jsonb
                 FROM messages
                 WHERE conversation_id = %s
                 ORDER BY created_at ASC
@@ -128,16 +158,24 @@ class PostgresChatStore:
             )
             return [_message_from_row(row) for row in cur.fetchall()]
 
-    def create_message(self, conversation_id: str, role: MessageRole, content: str) -> Message:
+    def create_message(
+        self,
+        conversation_id: str,
+        role: MessageRole,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Message:
+        self._ensure_schema()
         message_id = str(uuid.uuid4())
         with psycopg.connect(self.database_url) as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                INSERT INTO messages (id, conversation_id, role, content)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id::text, conversation_id::text, role::text, content, created_at
+                INSERT INTO messages (id, conversation_id, role, content, metadata_jsonb)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id::text, conversation_id::text, role::text, content, created_at,
+                          metadata_jsonb
                 """,
-                (message_id, conversation_id, role, content),
+                (message_id, conversation_id, role, content, json.dumps(metadata or {})),
             )
             row = cur.fetchone()
             if row is None:
@@ -148,16 +186,30 @@ class PostgresChatStore:
             )
             return message
 
-    def update_message_content(self, message_id: str, content: str) -> Message:
+    def update_message_content(
+        self,
+        message_id: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Message:
+        self._ensure_schema()
         with psycopg.connect(self.database_url) as conn, conn.cursor(row_factory=dict_row) as cur:
+            params: tuple[Any, ...]
+            metadata_sql = ""
+            if metadata is not None:
+                metadata_sql = ", metadata_jsonb = %s"
+                params = (content, json.dumps(metadata), message_id)
+            else:
+                params = (content, message_id)
             cur.execute(
-                """
+                f"""
                 UPDATE messages
-                SET content = %s
+                SET content = %s{metadata_sql}
                 WHERE id = %s
-                RETURNING id::text, conversation_id::text, role::text, content, created_at
+                RETURNING id::text, conversation_id::text, role::text, content, created_at,
+                          metadata_jsonb
                 """,
-                (content, message_id),
+                params,
             )
             row = cur.fetchone()
             if row is None:
@@ -200,6 +252,7 @@ class MessageBody(BaseModel):
     role: MessageRole
     content: str
     created_at: datetime
+    thinking_trace: str | None = None
 
 
 class ListMessagesResponse(BaseModel):
@@ -210,6 +263,19 @@ class SendMessageRequest(BaseModel):
     role: Literal["user"] = "user"
     content: str = Field(min_length=1)
     model: str | None = None
+
+
+class ModelOption(BaseModel):
+    id: str
+    label: str
+    provider: str
+    source: Literal["discovered", "fallback"]
+    thinking_supported: bool = False
+
+
+class ListModelsResponse(BaseModel):
+    models: list[ModelOption]
+    discovery_errors: dict[str, str] = Field(default_factory=dict)
 
 
 @tool
@@ -228,7 +294,9 @@ app = FastAPI(title="prism-chatbot-api", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv(
-        "CORS_ALLOW_ORIGINS", "http://localhost:3000,http://localhost:3001"
+        "CORS_ALLOW_ORIGINS",
+        "http://localhost:3000,http://localhost:3001,http://localhost:3002,"
+        "http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:3002",
     ).split(","),
     allow_credentials=True,
     allow_methods=["*"],
@@ -242,6 +310,12 @@ app.state.log_store = None
 @app.get("/healthz")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/v1/models", response_model=ListModelsResponse)
+async def list_models(request: Request) -> ListModelsResponse:
+    credentials = _credentials_from_request(request)
+    return await _discover_models(credentials)
 
 
 @app.post("/v1/conversations", status_code=201, response_model=CreateConversationResponse)
@@ -306,12 +380,14 @@ async def send_message(
         provider=provider,
         extra={"source": "chatbot-api"},
     )
+    credentials = _credentials_from_request(request)
     agent = _build_agent(
         model=model,
         system_prompt=conversation.system_prompt,
         history=previous_messages,
         prism_metadata=prism_metadata,
         prism_client=prism_client,
+        credentials=credentials,
     )
 
     async def event_stream() -> AsyncIterator[bytes]:
@@ -333,6 +409,7 @@ async def send_message(
             },
         )
         collected: list[str] = []
+        thinking_collected: list[str] = []
         try:
             stream = agent.stream_async(
                 body.content,
@@ -343,6 +420,10 @@ async def send_message(
                 },
             )
             async for event in stream:
+                thinking_delta = _agent_stream_thinking_delta(event)
+                if thinking_delta:
+                    thinking_collected.append(thinking_delta)
+                    yield _sse("thinking", {"delta": thinking_delta})
                 delta = _agent_stream_delta(event)
                 if delta:
                     collected.append(delta)
@@ -364,12 +445,15 @@ async def send_message(
                 {"error": {"type": "EmptyResponse", "message": "model returned no content"}},
             )
             return
-        store.update_message_content(assistant_message.id, content)
+        thinking_trace = "".join(thinking_collected).strip() or None
+        metadata = {"thinking_trace": thinking_trace} if thinking_trace else {}
+        store.update_message_content(assistant_message.id, content, metadata)
         yield _sse(
             "done",
             {
                 "message_id": assistant_message.id,
                 "inference_id": inference_id,
+                "thinking_trace": thinking_trace,
             },
         )
 
@@ -399,6 +483,56 @@ def _agent_stream_delta(event: Any) -> str:
     return str(delta.get("text") or "")
 
 
+def _agent_stream_thinking_delta(event: Any) -> str:
+    if not isinstance(event, dict):
+        return ""
+
+    direct = _first_text_value(
+        event,
+        {
+            "thinking",
+            "thinking_delta",
+            "reasoning",
+            "reasoning_delta",
+            "reasoning_content",
+            "reasoning_text",
+        },
+    )
+    if direct:
+        return direct
+
+    inner = event.get("event")
+    if not isinstance(inner, dict):
+        return ""
+    delta = inner.get("delta")
+    if not isinstance(delta, dict):
+        return ""
+    if str(delta.get("type") or "").lower() not in {
+        "thinkingdelta",
+        "reasoningdelta",
+        "reasoning_delta",
+        "thinking_delta",
+    }:
+        return ""
+    return _first_text_value(delta, {"text", "thinking", "reasoning"}) or ""
+
+
+def _first_text_value(value: Any, keys: set[str]) -> str:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key in keys and isinstance(nested, str):
+                return nested
+            found = _first_text_value(nested, keys)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _first_text_value(item, keys)
+            if found:
+                return found
+    return ""
+
+
 def _llm_messages(*, system_prompt: str | None, history: list[Message]) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
     if system_prompt:
@@ -416,11 +550,15 @@ def _build_agent(
     history: list[Message],
     prism_metadata: dict[str, Any],
     prism_client: PrismClient,
+    credentials: dict[str, str] | None = None,
 ) -> Agent:
+    client_args: dict[str, Any] = {
+        "metadata": prism_metadata,
+    }
+    _, provider, _, _ = litellm.get_llm_provider(model)
+    client_args.update(_litellm_client_args(credentials or {}, provider))
     llm = LiteLLMModel(
-        client_args={
-            "metadata": prism_metadata,
-        },
+        client_args=client_args,
         model_id=model,
         params={"stream": True},
     )
@@ -448,6 +586,242 @@ def _litellm_model_and_provider(model: str) -> tuple[str, str]:
         model = f"bedrock/converse/{model.removeprefix('bedrock/')}"
     _, provider, _, _ = litellm.get_llm_provider(model)
     return model, provider
+
+
+def _credentials_from_request(request: Request) -> dict[str, str]:
+    header_to_key = {
+        "x-prism-openai-api-key": "openai_api_key",
+        "x-prism-anthropic-api-key": "anthropic_api_key",
+        "x-prism-gemini-api-key": "gemini_api_key",
+        "x-prism-aws-access-key-id": "aws_access_key_id",
+        "x-prism-aws-secret-access-key": "aws_secret_access_key",
+        "x-prism-aws-session-token": "aws_session_token",
+        "x-prism-aws-region": "aws_region",
+    }
+    credentials: dict[str, str] = {}
+    for header, key in header_to_key.items():
+        value = request.headers.get(header)
+        if value:
+            credentials[key] = value.strip()
+    return credentials
+
+
+def _litellm_client_args(credentials: dict[str, str], provider: str) -> dict[str, Any]:
+    client_args: dict[str, Any] = {}
+    if provider == "openai" and credentials.get("openai_api_key"):
+        client_args["api_key"] = credentials["openai_api_key"]
+    if provider == "anthropic" and credentials.get("anthropic_api_key"):
+        client_args["api_key"] = credentials["anthropic_api_key"]
+    if provider in {"gemini", "google"} and credentials.get("gemini_api_key"):
+        client_args["api_key"] = credentials["gemini_api_key"]
+    if provider == "bedrock" and credentials.get("aws_access_key_id"):
+        client_args["aws_access_key_id"] = credentials["aws_access_key_id"]
+    if provider == "bedrock" and credentials.get("aws_secret_access_key"):
+        client_args["aws_secret_access_key"] = credentials["aws_secret_access_key"]
+    if provider == "bedrock" and credentials.get("aws_session_token"):
+        client_args["aws_session_token"] = credentials["aws_session_token"]
+    if provider == "bedrock" and credentials.get("aws_region"):
+        client_args["aws_region_name"] = credentials["aws_region"]
+    return client_args
+
+
+async def _discover_models(credentials: dict[str, str]) -> ListModelsResponse:
+    discovered: list[ModelOption] = []
+    errors: dict[str, str] = {}
+
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        if api_key := credentials.get("openai_api_key") or os.getenv("OPENAI_API_KEY"):
+            try:
+                discovered.extend(await _discover_openai_models(client, api_key))
+            except Exception as exc:  # pragma: no cover - network/provider failure path
+                errors["openai"] = str(exc)
+        if api_key := credentials.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY"):
+            try:
+                discovered.extend(await _discover_anthropic_models(client, api_key))
+            except Exception as exc:  # pragma: no cover - network/provider failure path
+                errors["anthropic"] = str(exc)
+        if api_key := credentials.get("gemini_api_key") or os.getenv("GEMINI_API_KEY"):
+            try:
+                discovered.extend(await _discover_gemini_models(client, api_key))
+            except Exception as exc:  # pragma: no cover - network/provider failure path
+                errors["gemini"] = str(exc)
+
+    try:
+        discovered.extend(_discover_bedrock_models(credentials))
+    except Exception as exc:  # pragma: no cover - network/provider failure path
+        errors["bedrock"] = str(exc)
+
+    models = _dedupe_models(discovered)
+    if not models:
+        models = _fallback_models()
+    return ListModelsResponse(models=models, discovery_errors=errors)
+
+
+async def _discover_openai_models(client: httpx.AsyncClient, api_key: str) -> list[ModelOption]:
+    response = await client.get(
+        "https://api.openai.com/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    response.raise_for_status()
+    ids = sorted(
+        item["id"]
+        for item in response.json().get("data", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and item["id"].startswith(("gpt-", "o1", "o3", "o4", "o5", "chatgpt-"))
+    )
+    preferred = _prioritize(ids, ("gpt-4.1", "gpt-4o", "o3", "o4", "gpt-5"))
+    return [
+        ModelOption(
+            id=model_id,
+            label=_model_label(model_id),
+            provider="openai",
+            source="discovered",
+            thinking_supported=model_id.startswith(("o", "gpt-5")),
+        )
+        for model_id in preferred[:40]
+    ]
+
+
+async def _discover_anthropic_models(client: httpx.AsyncClient, api_key: str) -> list[ModelOption]:
+    response = await client.get(
+        "https://api.anthropic.com/v1/models",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+    )
+    response.raise_for_status()
+    ids = sorted(
+        item["id"]
+        for item in response.json().get("data", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    )
+    return [
+        ModelOption(
+            id=model_id,
+            label=_model_label(model_id),
+            provider="anthropic",
+            source="discovered",
+            thinking_supported="claude" in model_id and "3-" not in model_id,
+        )
+        for model_id in ids[:40]
+    ]
+
+
+async def _discover_gemini_models(client: httpx.AsyncClient, api_key: str) -> list[ModelOption]:
+    response = await client.get(
+        "https://generativelanguage.googleapis.com/v1beta/models",
+        params={"key": api_key},
+    )
+    response.raise_for_status()
+    options: list[ModelOption] = []
+    for item in response.json().get("models", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").removeprefix("models/")
+        methods = item.get("supportedGenerationMethods") or []
+        if not name or "generateContent" not in methods:
+            continue
+        model_id = f"gemini/{name}"
+        options.append(
+            ModelOption(
+                id=model_id,
+                label=_model_label(name),
+                provider="gemini",
+                source="discovered",
+                thinking_supported="2.5" in name,
+            )
+        )
+    return options[:40]
+
+
+def _discover_bedrock_models(credentials: dict[str, str]) -> list[ModelOption]:
+    if not (
+        credentials.get("aws_access_key_id")
+        or os.getenv("AWS_ACCESS_KEY_ID")
+        or os.getenv("AWS_PROFILE")
+    ):
+        return []
+    region = (
+        credentials.get("aws_region")
+        or os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION", "us-west-2")
+    )
+    kwargs: dict[str, str] = {"region_name": region}
+    if credentials.get("aws_access_key_id"):
+        kwargs["aws_access_key_id"] = credentials["aws_access_key_id"]
+    if credentials.get("aws_secret_access_key"):
+        kwargs["aws_secret_access_key"] = credentials["aws_secret_access_key"]
+    if credentials.get("aws_session_token"):
+        kwargs["aws_session_token"] = credentials["aws_session_token"]
+    client = boto3.client("bedrock", **kwargs)
+    response = client.list_foundation_models()
+    options: list[ModelOption] = []
+    for summary in response.get("modelSummaries", []):
+        model_id = summary.get("modelId")
+        modalities = summary.get("outputModalities") or []
+        if not isinstance(model_id, str) or "TEXT" not in modalities:
+            continue
+        lite_id = f"bedrock/{model_id}"
+        options.append(
+            ModelOption(
+                id=lite_id,
+                label=_model_label(model_id),
+                provider="bedrock",
+                source="discovered",
+                thinking_supported="claude" in model_id and "3-" not in model_id,
+            )
+        )
+    return sorted(options, key=lambda item: item.id)[:80]
+
+
+def _fallback_models() -> list[ModelOption]:
+    fallback = [
+        ("gpt-4o", "openai", False),
+        ("gpt-4.1", "openai", False),
+        ("o3-mini", "openai", True),
+        ("claude-3-5-sonnet-latest", "anthropic", False),
+        ("claude-sonnet-4-5", "anthropic", True),
+        ("gemini/gemini-1.5-flash", "gemini", False),
+        ("gemini/gemini-2.5-flash", "gemini", True),
+        ("bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0", "bedrock", True),
+        ("bedrock/us.meta.llama3-3-70b-instruct-v1:0", "bedrock", False),
+        ("bedrock/us.deepseek.r1-v1:0", "bedrock", True),
+    ]
+    return [
+        ModelOption(
+            id=model_id,
+            label=_model_label(model_id),
+            provider=provider,
+            source="fallback",
+            thinking_supported=thinking,
+        )
+        for model_id, provider, thinking in fallback
+    ]
+
+
+def _dedupe_models(models: list[ModelOption]) -> list[ModelOption]:
+    by_id: dict[str, ModelOption] = {}
+    for model in models:
+        by_id.setdefault(model.id, model)
+    if by_id:
+        for fallback in _fallback_models():
+            if fallback.provider in {model.provider for model in by_id.values()}:
+                by_id.setdefault(fallback.id, fallback)
+    return sorted(by_id.values(), key=lambda item: (item.provider, item.label))
+
+
+def _prioritize(values: list[str], prefixes: tuple[str, ...]) -> list[str]:
+    preferred = [value for value in values if value.startswith(prefixes)]
+    rest = [value for value in values if value not in set(preferred)]
+    return preferred + rest
+
+
+def _model_label(model_id: str) -> str:
+    base = model_id.removeprefix("bedrock/").removeprefix("gemini/")
+    base = base.split("/")[-1]
+    return base.replace(".", " ").replace("-", " ").replace("_", " ").title()
 
 
 def _get_store(app: FastAPI) -> ChatStore:
@@ -545,19 +919,24 @@ def _conversation_from_row(row: dict[str, Any]) -> Conversation:
 
 
 def _message_from_row(row: dict[str, Any]) -> Message:
+    metadata = row.get("metadata_jsonb") or {}
     return Message(
         id=row["id"],
         conversation_id=row["conversation_id"],
         role=row["role"],
         content=row["content"],
         created_at=row["created_at"],
+        metadata=dict(metadata) if isinstance(metadata, dict) else {},
     )
 
 
 def _message_body(message: Message) -> MessageBody:
+    metadata = message.metadata or {}
+    thinking_trace = metadata.get("thinking_trace")
     return MessageBody(
         id=message.id,
         role=message.role,
         content=message.content,
         created_at=message.created_at,
+        thinking_trace=thinking_trace if isinstance(thinking_trace, str) else None,
     )

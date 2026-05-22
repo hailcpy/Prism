@@ -428,7 +428,6 @@ Moves chatbot-api off direct `litellm.acompletion` to a Strands agent loop. Impl
 - [ ] README: setup, architecture overview, schema decisions, tradeoffs, future improvements.
 - [ ] Loom demo: chat → log appears → dashboard updates → tool call → tool row appears → kill ingestion → SDK queue resilience → restart → drains.
 - [ ] Final pass on all ADRs (any decision that changed during build).
-- [ ] Submit to work@ollive.ai.
 
 **Estimate remaining from here:** ~½ working day (Phase 8 polish + submission).
 

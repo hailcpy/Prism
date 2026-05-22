@@ -50,6 +50,7 @@ class FakeChatStore:
         conversation_id: str,
         role: Literal["user", "assistant", "system"],
         content: str,
+        metadata: dict[str, Any] | None = None,
     ) -> Message:
         message = Message(
             id=str(uuid.uuid4()),
@@ -57,14 +58,24 @@ class FakeChatStore:
             role=role,
             content=content,
             created_at=datetime.now(UTC),
+            metadata=metadata or {},
         )
         self.messages.append(message)
         return message
 
-    def update_message_content(self, message_id: str, content: str) -> Message:
+    def update_message_content(
+        self,
+        message_id: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Message:
         for index, message in enumerate(self.messages):
             if message.id == message_id:
-                updated = replace(message, content=content)
+                updated = replace(
+                    message,
+                    content=content,
+                    metadata=metadata if metadata is not None else message.metadata,
+                )
                 self.messages[index] = updated
                 return updated
         raise KeyError(message_id)
@@ -154,6 +165,43 @@ def test_chatbot_streams_assistant_tokens_via_sse(chatbot_client) -> None:
     messages = client.get(f"/v1/conversations/{conversation_id}/messages").json()["messages"]
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assert messages[1]["content"] == "hello"
+
+
+def test_chatbot_streams_and_persists_thinking_traces(monkeypatch) -> None:
+    store = FakeChatStore()
+    app.state.chat_store = store
+    app.state.prism_client = FakePrismClient()
+
+    def fake_build_agent(**kwargs):
+        return FakeAgent(
+            [
+                {"thinking_delta": "plan "},
+                {
+                    "event": {
+                        "type": "modelContentBlockDeltaEvent",
+                        "delta": {"type": "thinkingDelta", "text": "then answer"},
+                    }
+                },
+                {"data": "done"},
+            ]
+        )
+
+    monkeypatch.setattr(chatbot_main, "_build_agent", fake_build_agent)
+    client = TestClient(app)
+
+    created = client.post("/v1/conversations", json={"model_default": "gpt-4o"})
+    conversation_id = created.json()["conversation_id"]
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        json={"role": "user", "content": "hi", "model": "gpt-4o"},
+    )
+
+    events = _parse_sse(response.text)
+    thinking = [data["delta"] for event, data in events if event == "thinking"]
+    assert "".join(thinking) == "plan then answer"
+
+    messages = client.get(f"/v1/conversations/{conversation_id}/messages").json()["messages"]
+    assert messages[1]["thinking_trace"] == "plan then answer"
 
 
 def test_chatbot_routes_bedrock_application_profiles_through_converse(chatbot_client) -> None:
