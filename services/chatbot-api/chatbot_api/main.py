@@ -420,7 +420,6 @@ def _build_agent(
     llm = LiteLLMModel(
         client_args={
             "metadata": prism_metadata,
-            "stream_options": {"include_usage": True},
         },
         model_id=model,
         params={"stream": True},
