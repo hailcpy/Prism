@@ -152,3 +152,15 @@ SELECT ensure_inference_logs_partition(CURRENT_DATE);
 SELECT ensure_inference_logs_partition(CURRENT_DATE + 1);
 SELECT ensure_tool_invocations_partition(CURRENT_DATE);
 SELECT ensure_tool_invocations_partition(CURRENT_DATE + 1);
+
+CREATE TABLE IF NOT EXISTS dashboards (
+  id UUID PRIMARY KEY,
+  name TEXT NOT NULL,
+  owner_id UUID NULL,
+  layout_jsonb JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS dashboards_owner_id_idx ON dashboards (owner_id);
+CREATE INDEX IF NOT EXISTS dashboards_updated_at_idx ON dashboards (updated_at DESC);

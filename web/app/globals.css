@@ -19,8 +19,16 @@ body {
   margin: 0;
   min-height: 100vh;
   background:
-    radial-gradient(circle at top left, rgba(255, 122, 89, 0.2), transparent 30rem),
-    radial-gradient(circle at bottom right, rgba(35, 160, 148, 0.24), transparent 34rem),
+    radial-gradient(
+      circle at top left,
+      rgba(255, 122, 89, 0.2),
+      transparent 30rem
+    ),
+    radial-gradient(
+      circle at bottom right,
+      rgba(35, 160, 148, 0.24),
+      transparent 34rem
+    ),
     #eef6f4;
 }
 
@@ -525,4 +533,322 @@ button {
   .send-button {
     height: 44px;
   }
+}
+
+/* --- dashboards --- */
+.dash-shell {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px 32px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.dash-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.dash-header h1 {
+  margin: 0;
+  font-size: 22px;
+}
+.dash-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.dash-nav a,
+.dash-back {
+  color: #0b6b75;
+  text-decoration: none;
+  margin-right: 12px;
+  font-weight: 600;
+}
+.dash-name-input {
+  font-size: 20px;
+  font-weight: 600;
+  border: none;
+  background: transparent;
+  border-bottom: 1px dashed #0b6b75;
+  padding: 4px 8px;
+  min-width: 280px;
+}
+.dash-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dash-header-actions label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #2a4044;
+}
+.dash-save {
+  background: #0b6b75;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.dash-save:disabled {
+  background: #9bb6b1;
+  cursor: default;
+}
+.dash-error {
+  background: #ffe4d6;
+  color: #802b00;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.dash-create {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.dash-create input {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid #c4d6d2;
+}
+.dash-create button {
+  background: #0b6b75;
+  color: white;
+  border: none;
+  padding: 8px 18px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.dash-create button:disabled {
+  background: #9bb6b1;
+}
+.dash-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dash-list-row {
+  display: flex;
+  background: white;
+  border: 1px solid #d0e0dc;
+  border-radius: 8px;
+  padding: 12px 16px;
+  justify-content: space-between;
+  align-items: center;
+}
+.dash-list-link {
+  display: flex;
+  flex-direction: column;
+  text-decoration: none;
+  color: #142226;
+  flex: 1;
+}
+.dash-list-name {
+  font-weight: 600;
+}
+.dash-list-meta {
+  font-size: 12px;
+  color: #5b7370;
+}
+.dash-list-delete {
+  background: transparent;
+  border: 1px solid #cc5803;
+  color: #cc5803;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.dash-empty {
+  text-align: center;
+  color: #5b7370;
+  padding: 24px;
+  background: white;
+  border-radius: 8px;
+  border: 1px dashed #c4d6d2;
+}
+.dash-editor {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+.dash-palette {
+  position: sticky;
+  top: 16px;
+  background: white;
+  border: 1px solid #d0e0dc;
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dash-palette h2 {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #2a4044;
+}
+.dash-palette-hint {
+  font-size: 12px;
+  color: #5b7370;
+  margin: 0 0 4px;
+}
+.dash-palette-item {
+  text-align: left;
+  background: #f1faf7;
+  border: 1px solid #c4d6d2;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.dash-palette-item:hover {
+  background: #d8efe8;
+}
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 12px;
+  min-height: 400px;
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px dashed #c4d6d2;
+  border-radius: 8px;
+  padding: 12px;
+}
+.dash-grid-empty {
+  grid-column: span 12;
+  text-align: center;
+  padding: 48px;
+  color: #5b7370;
+}
+.dash-cell {
+  background: white;
+  border: 1px solid #d0e0dc;
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 140px;
+}
+.dash-cell-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.dash-cell-title {
+  flex: 1;
+  border: none;
+  font-weight: 600;
+  background: transparent;
+  font-size: 14px;
+  padding: 2px 4px;
+}
+.dash-cell-controls {
+  display: flex;
+  gap: 4px;
+}
+.dash-cell-controls button {
+  padding: 2px 6px;
+  font-size: 11px;
+  background: #f1faf7;
+  border: 1px solid #c4d6d2;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.dash-cell-remove {
+  color: #cc5803 !important;
+  border-color: #cc5803 !important;
+}
+.dash-cell-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+}
+.dash-bignum {
+  font-size: 32px;
+  font-weight: 600;
+  text-align: center;
+  color: #0b6b75;
+}
+.dash-widget-empty {
+  color: #5b7370;
+  font-size: 13px;
+  text-align: center;
+  padding: 16px;
+}
+.dash-chart {
+  width: 100%;
+  height: 100%;
+  max-height: 240px;
+}
+.dash-pie-wrap {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.dash-pie {
+  width: 160px;
+  height: 160px;
+  flex-shrink: 0;
+}
+.dash-pie-legend {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dash-pie-legend li {
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  gap: 6px;
+  align-items: center;
+}
+.dash-pie-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+}
+.dash-pie-value {
+  font-variant-numeric: tabular-nums;
+}
+.dash-table-wrap {
+  overflow: auto;
+  max-height: 100%;
+}
+.dash-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.dash-table th,
+.dash-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid #e6ede9;
+  white-space: nowrap;
+}
+.dash-table th {
+  background: #f1faf7;
+  font-weight: 600;
 }

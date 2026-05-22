@@ -37,10 +37,7 @@ const SERIES_COLORS = [
 ];
 
 export default function MetricsPage() {
-  const apiUrl = useMemo(
-    () => process.env.NEXT_PUBLIC_CHATBOT_API_URL ?? "http://localhost:8100",
-    [],
-  );
+  const apiUrl = useMemo(() => "/api/backend", []);
   const [rangeMinutes, setRangeMinutes] = useState(60);
   const [modelFilter, setModelFilter] = useState<string>("");
   const [providerFilter, setProviderFilter] = useState<string>("");

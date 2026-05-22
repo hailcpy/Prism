@@ -367,6 +367,7 @@ Make targets: `make up`, `make down`, `make logs`, `make seed`, `make test`, `ma
 10. **ADR-0010** — Dashboard reads pre-aggregated `metrics_minute`, populated by a dedicated `metrics-roller` consumer. Query-time aggregation is explicitly rejected.
 11. **ADR-0011** — SDK captures via a LiteLLM `CustomLogger` callback, not a call-site wrapper. Enables transparent capture inside agent runtimes (Strands) that own the LLM call site.
 12. **ADR-0012** — Tool-call traces via Strands hooks (`prism_sdk.strands.PrismStrandsHooks`). Introduces a `ToolInvocationEvent` event type and a `tool_invocations` table.
+13. **ADR-0013** — Custom dashboards are constrained: pre-built widgets bound to a whitelisted metric vocabulary, no user SQL, no user-defined metrics, no alerts or real-time in v1. Bounds query cost, eliminates injection surface, and keeps the contract swap-compatible with a future ClickHouse rollup.
 
 ---
 
@@ -424,12 +425,70 @@ Moves chatbot-api off direct `litellm.acompletion` to a Strands agent loop. Impl
 - [x] Update ADR-0012 status to **Accepted** with the resolutions inline.
 - **Demoable:** chat triggers a tool call; both an `inference_log` row and a correlated `tool_invocations` row land in DB.
 
-### Phase 8 — Polish + submission (½ day)
+### Phase 8 — Custom dashboards (1–1½ days)
+
+User-saved dashboards composed of pre-built widgets. Reads from `metrics_minute` for aggregates, with a narrow drill-down into `inference_logs` for per-conversation cost (the `top_conversations_by_cost` widget). Builds on the cost columns shipped in `6be2a04` (`metrics_minute.cost_usd_sum`, `inference_logs.cost_usd`, and the existing `GET /v1/conversations/:id/cost`). See **ADR-0013** for the constrained-widget rationale.
+
+**Goal:** a user can open the chat UI, build a dashboard by dropping pre-built widgets onto a grid, save it, reload the page, and see the same layout with live data.
+
+**Out of scope (v1):**
+- User-supplied SQL or user-defined metrics. Widgets pick from a whitelisted vocabulary only.
+- Alerts, thresholds, notifications.
+- Real-time auto-refresh / websockets. Manual refresh + a configurable poll interval is enough.
+- Multi-tenant auth. `owner_id` exists in the schema but is `NULL` in v1.
+
+**Schema** (Group A — app data, mutable, low volume):
+```sql
+dashboards(
+  id uuid PK,
+  name text NOT NULL,
+  owner_id uuid NULL,           -- soft-FK style; NULL in v1 (no auth)
+  layout_jsonb jsonb NOT NULL,  -- [{i, x, y, w, h, widget: {kind, metric_kind, filters, options}}]
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+)
+```
+No FK to `inference_logs` / `metrics_minute` — per ADR-0008, dashboards reference observability data only through the whitelisted-metric vocabulary, never via DB joins.
+
+**Whitelisted metric kinds (v1):**
+- `cost_usd_sum`
+- `count`
+- `error_rate`
+- `latency_p50_ms`
+- `latency_p95_ms`
+- `prompt_tokens_sum`
+- `completion_tokens_sum`
+- `top_conversations_by_cost` (the one drill-down into `inference_logs`)
+
+All metric kinds except `top_conversations_by_cost` read from `metrics_minute`. The drill-down reads `inference_logs` grouped by `conversation_id` with a hard `LIMIT` (default 10).
+
+**Widget kinds (v1):** `timeseries`, `bignum`, `table`, `pie`. Each widget config is `{kind, metric_kind, filters: {model?, provider?, from?, to?}, options}`. Server validates that `(kind, metric_kind)` pairs are sensible (e.g. `top_conversations_by_cost` requires `kind=table`).
+
+**Endpoints** (on chatbot-api, since it already owns `/v1/metrics`):
+- `GET /v1/dashboards` → list (id, name, updated_at) for the current user (NULL owner in v1 = all rows).
+- `POST /v1/dashboards` → create from `{name, layout}`.
+- `GET /v1/dashboards/:id` → full dashboard incl. layout.
+- `PUT /v1/dashboards/:id` → update name + layout.
+- `DELETE /v1/dashboards/:id`.
+- `GET /v1/dashboards/:id/data?from=&to=` → resolves every widget in the layout server-side and returns `{widget_id → data}`. Whitelist enforced here, not in the layout writer.
+
+**Tasks:**
+- [ ] Migration: `dashboards` table + indexes (`owner_id`, `updated_at`).
+- [ ] `DashboardStore` interface in `infra/storage/` (per ADR-0005). One Postgres impl.
+- [ ] Pydantic models for `Widget` and `DashboardLayout` with whitelist enforcement.
+- [ ] `WidgetResolver` service: maps `(metric_kind, filters)` → `LogStore.get_metrics(...)` or the cost drill-down query. Single place that knows the whitelist.
+- [ ] Dashboard CRUD endpoints + `GET /:id/data` on chatbot-api.
+- [ ] Web UI: `/dashboards` index, `/dashboards/:id` viewer/editor with drag-and-drop grid (react-grid-layout or equivalent), widget palette, save/load.
+- [ ] Smoke test: create a dashboard with one of each widget kind, save, reload, confirm data renders; rename + persist; delete.
+
+**Demoable:** drag-and-drop dashboard editor in the chat UI; create "Cost overview" with bignum (`cost_usd_sum`), timeseries (`cost_usd_sum` per minute), pie (`cost_usd_sum` by model), table (`top_conversations_by_cost`); reload the page and see the same layout populated with live data.
+
+### Phase 9 — Polish + submission (½ day)
 - [ ] README: setup, architecture overview, schema decisions, tradeoffs, future improvements.
-- [ ] Loom demo: chat → log appears → dashboard updates → tool call → tool row appears → kill ingestion → SDK queue resilience → restart → drains.
+- [ ] Loom demo: chat → log appears → dashboard updates → tool call → tool row appears → custom dashboard build & save → kill ingestion → SDK queue resilience → restart → drains.
 - [ ] Final pass on all ADRs (any decision that changed during build).
 
-**Estimate remaining from here:** ~½ working day (Phase 8 polish + submission).
+**Estimate remaining from here:** ~2 working days (Phase 8 dashboards + Phase 9 polish).
 
 ---
 

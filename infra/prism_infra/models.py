@@ -108,6 +108,25 @@ class ConversationCost:
 
 
 @dataclass(frozen=True)
+class Dashboard:
+    id: str
+    name: str
+    owner_id: str | None
+    layout: list[dict[str, Any]]
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class TopConversationByCost:
+    conversation_id: str
+    cost_usd: float
+    calls: int
+    prompt_tokens: int
+    completion_tokens: int
+
+
+@dataclass(frozen=True)
 class LogsQuery:
     start: datetime
     end: datetime

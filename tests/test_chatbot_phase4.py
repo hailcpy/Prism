@@ -90,7 +90,7 @@ class FakePrismClient:
 
 
 class FakeAgent:
-    def __init__(self, chunks: list[dict[str, str]], exc: Exception | None = None) -> None:
+    def __init__(self, chunks: list[dict[str, Any]], exc: Exception | None = None) -> None:
         self.chunks = chunks
         self.exc = exc
 

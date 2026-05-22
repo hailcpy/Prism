@@ -108,11 +108,13 @@ function parseSseBlock(block: string): SseEvent | null {
 
 function credentialHeaders(credentials: Credentials): HeadersInit {
   const headers: Record<string, string> = {};
-  if (credentials.openaiApiKey) headers["x-prism-openai-api-key"] = credentials.openaiApiKey;
+  if (credentials.openaiApiKey)
+    headers["x-prism-openai-api-key"] = credentials.openaiApiKey;
   if (credentials.anthropicApiKey) {
     headers["x-prism-anthropic-api-key"] = credentials.anthropicApiKey;
   }
-  if (credentials.geminiApiKey) headers["x-prism-gemini-api-key"] = credentials.geminiApiKey;
+  if (credentials.geminiApiKey)
+    headers["x-prism-gemini-api-key"] = credentials.geminiApiKey;
   if (credentials.awsAccessKeyId) {
     headers["x-prism-aws-access-key-id"] = credentials.awsAccessKeyId;
   }
@@ -122,7 +124,8 @@ function credentialHeaders(credentials: Credentials): HeadersInit {
   if (credentials.awsSessionToken) {
     headers["x-prism-aws-session-token"] = credentials.awsSessionToken;
   }
-  if (credentials.awsRegion) headers["x-prism-aws-region"] = credentials.awsRegion;
+  if (credentials.awsRegion)
+    headers["x-prism-aws-region"] = credentials.awsRegion;
   return headers;
 }
 
@@ -130,17 +133,16 @@ function storedCredentials(): Credentials {
   if (typeof window === "undefined") return defaultCredentials;
   try {
     const stored = window.localStorage.getItem("prism.credentials");
-    return stored ? { ...defaultCredentials, ...JSON.parse(stored) } : defaultCredentials;
+    return stored
+      ? { ...defaultCredentials, ...JSON.parse(stored) }
+      : defaultCredentials;
   } catch {
     return defaultCredentials;
   }
 }
 
 export default function Home() {
-  const apiUrl = useMemo(
-    () => process.env.NEXT_PUBLIC_CHATBOT_API_URL ?? "http://localhost:8100",
-    [],
-  );
+  const apiUrl = useMemo(() => "/api/backend", []);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -151,11 +153,15 @@ export default function Home() {
   const [status, setStatus] = useState<string | null>(null);
   const [modelStatus, setModelStatus] = useState<string | null>(null);
   const [showCredentials, setShowCredentials] = useState(false);
-  const [credentials, setCredentials] = useState<Credentials>(storedCredentials);
+  const [credentials, setCredentials] =
+    useState<Credentials>(storedCredentials);
   const messageListRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    window.localStorage.setItem("prism.credentials", JSON.stringify(credentials));
+    window.localStorage.setItem(
+      "prism.credentials",
+      JSON.stringify(credentials),
+    );
   }, [credentials]);
 
   const loadConversations = useCallback(async () => {
@@ -179,7 +185,9 @@ export default function Home() {
   const loadMessages = useCallback(
     async (id: string) => {
       try {
-        const response = await fetch(`${apiUrl}/v1/conversations/${id}/messages`);
+        const response = await fetch(
+          `${apiUrl}/v1/conversations/${id}/messages`,
+        );
         if (!response.ok) {
           setStatus("Unable to load messages.");
           return;
@@ -207,7 +215,9 @@ export default function Home() {
       const nextModels = body.models.length ? body.models : [fallbackModel];
       setModels(nextModels);
       setModel((current) =>
-        nextModels.some((item) => item.id === current) ? current : nextModels[0].id,
+        nextModels.some((item) => item.id === current)
+          ? current
+          : nextModels[0].id,
       );
       const hasFallback = nextModels.some((item) => item.source === "fallback");
       const errorCount = Object.keys(body.discovery_errors).length;
@@ -247,11 +257,14 @@ export default function Home() {
   useEffect(() => {
     function handleKeyDown(event: globalThis.KeyboardEvent) {
       const target = event.target as HTMLElement | null;
-      if (["TEXTAREA", "INPUT", "SELECT"].includes(target?.tagName ?? "")) return;
+      if (["TEXTAREA", "INPUT", "SELECT"].includes(target?.tagName ?? ""))
+        return;
       const node = messageListRef.current;
       if (!node) return;
-      if (event.key === "ArrowDown") node.scrollBy({ top: 120, behavior: "smooth" });
-      if (event.key === "ArrowUp") node.scrollBy({ top: -120, behavior: "smooth" });
+      if (event.key === "ArrowDown")
+        node.scrollBy({ top: 120, behavior: "smooth" });
+      if (event.key === "ArrowUp")
+        node.scrollBy({ top: -120, behavior: "smooth" });
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -351,7 +364,11 @@ export default function Home() {
           setMessages((current) =>
             current.map((message) =>
               message.id === draftUserId
-                ? { ...message, id: userId, created_at: data.created_at as string }
+                ? {
+                    ...message,
+                    id: userId,
+                    created_at: data.created_at as string,
+                  }
                 : message,
             ),
           );
@@ -397,7 +414,9 @@ export default function Home() {
       if (streamError) throw new Error(streamError);
       await loadConversations();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Unable to send message.");
+      setStatus(
+        error instanceof Error ? error.message : "Unable to send message.",
+      );
     } finally {
       setBusy(false);
     }
@@ -410,7 +429,8 @@ export default function Home() {
     }
   }
 
-  const selectedModel = models.find((item) => item.id === model) ?? fallbackModel;
+  const selectedModel =
+    models.find((item) => item.id === model) ?? fallbackModel;
   const providerGroups = Array.from(
     models.reduce((groups, item) => {
       const group = groups.get(item.provider) ?? [];
@@ -430,7 +450,11 @@ export default function Home() {
             <p className="brand-subtitle">LLM traces and chat</p>
           </div>
         </div>
-        <button className="new-chat" disabled={isBusy} onClick={createConversation}>
+        <button
+          className="new-chat"
+          disabled={isBusy}
+          onClick={createConversation}
+        >
           New chat
         </button>
         <div className="conversation-list">
@@ -445,7 +469,9 @@ export default function Home() {
                 setModel(conversation.model_default);
               }}
             >
-              <span className="conversation-model">{conversation.model_default}</span>
+              <span className="conversation-model">
+                {conversation.model_default}
+              </span>
               <span className="conversation-meta">
                 {conversation.message_count} messages
               </span>
@@ -529,7 +555,10 @@ export default function Home() {
             <input
               value={credentials.awsRegion}
               onChange={(event) =>
-                setCredentials((current) => ({ ...current, awsRegion: event.target.value }))
+                setCredentials((current) => ({
+                  ...current,
+                  awsRegion: event.target.value,
+                }))
               }
               placeholder="AWS region"
             />
@@ -566,10 +595,16 @@ export default function Home() {
               placeholder="AWS session token"
               type="password"
             />
-            <button className="refresh-button" type="button" onClick={loadModels}>
+            <button
+              className="refresh-button"
+              type="button"
+              onClick={loadModels}
+            >
               Refresh models
             </button>
-            {modelStatus ? <span className="model-status">{modelStatus}</span> : null}
+            {modelStatus ? (
+              <span className="model-status">{modelStatus}</span>
+            ) : null}
           </section>
         ) : null}
 
@@ -578,8 +613,8 @@ export default function Home() {
             <div className="empty-state">
               <span className="empty-glow" />
               <p>
-                Start a conversation. Prism stores the chat, streams model output,
-                and keeps thinking traces when the provider emits them.
+                Start a conversation. Prism stores the chat, streams model
+                output, and keeps thinking traces when the provider emits them.
               </p>
             </div>
           ) : (

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -22,8 +24,9 @@ from strands import Agent, tool
 from strands.models.litellm import LiteLLMModel
 
 import prism_sdk
+from chatbot_api.dashboards import router as dashboards_router
 from prism_infra.models import MetricsQuery
-from prism_infra.storage import LogStore, PostgresLogStore
+from prism_infra.storage import LogStore, PostgresLogStore, run_migrations
 from prism_sdk import PrismClient
 from prism_sdk.strands import PrismStrandsHooks
 
@@ -290,7 +293,18 @@ def web_search(query: str) -> str:
     return f"Demo search result for {query!r}: no live web request was made."
 
 
-app = FastAPI(title="prism-chatbot-api", version="0.1.0")
+@contextlib.asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        try:
+            await asyncio.to_thread(run_migrations, database_url)
+        except Exception:
+            logging.getLogger(__name__).exception("startup migrations failed")
+    yield
+
+
+app = FastAPI(title="prism-chatbot-api", version="0.1.0", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv(
@@ -305,6 +319,8 @@ app.add_middleware(
 app.state.chat_store = None
 app.state.prism_client = None
 app.state.log_store = None
+app.state.dashboard_store = None
+app.include_router(dashboards_router)
 
 
 @app.get("/healthz")
