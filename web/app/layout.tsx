@@ -22,7 +22,7 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <div className="root-shell">
+          <div className="min-h-screen flex flex-col">
             <NavBar />
             {children}
           </div>

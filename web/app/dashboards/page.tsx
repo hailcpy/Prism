@@ -13,6 +13,10 @@ export default function DashboardsIndexPage() {
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<DashboardSummary | null>(
+    null,
+  );
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -54,34 +58,50 @@ export default function DashboardsIndexPage() {
     [apiUrl, name, router],
   );
 
-  const handleDelete = useCallback(
-    async (id: string) => {
-      if (!confirm("Delete this dashboard?")) return;
-      try {
-        const response = await fetch(`${apiUrl}/v1/dashboards/${id}`, {
-          method: "DELETE",
-        });
-        if (!response.ok && response.status !== 204) {
-          throw new Error(`status ${response.status}`);
-        }
-        await load();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "delete failed");
+  const confirmDelete = useCallback(async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      const response = await fetch(
+        `${apiUrl}/v1/dashboards/${pendingDelete.id}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok && response.status !== 204) {
+        throw new Error(`status ${response.status}`);
       }
-    },
-    [apiUrl, load],
-  );
+      setPendingDelete(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "delete failed");
+    } finally {
+      setDeleting(false);
+    }
+  }, [apiUrl, load, pendingDelete]);
+
+  useEffect(() => {
+    if (!pendingDelete) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPendingDelete(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pendingDelete]);
 
   return (
     <main className="max-w-5xl mx-auto p-6 md:p-12 space-y-8 min-h-[calc(100vh-56px)] bg-mesh-light dark:bg-mesh-dark text-zinc-900 dark:text-zinc-100">
       <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <h1 className="text-3xl font-bold">Custom dashboards</h1>
-        <nav className="flex items-center gap-4 text-sm font-semibold">
-          <Link href="/" className="text-[#009f8f] hover:text-[#0b6b75] dark:text-[#ff6d4d] dark:hover:text-[#ff8f75] transition-colors">Chat</Link>
-          <Link href="/metrics" className="text-[#009f8f] hover:text-[#0b6b75] dark:text-[#ff6d4d] dark:hover:text-[#ff8f75] transition-colors">Metrics</Link>
-        </nav>
+        <div>
+          <h1 className="text-3xl font-bold">Custom dashboards</h1>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+            Compose widgets to track cost, latency, and usage over time.
+          </p>
+        </div>
       </header>
-      {error && <div className="p-3 mt-2 rounded bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 text-sm border border-red-200 dark:border-red-800/30">{error}</div>}
+      {error && (
+        <div className="p-3 mt-2 rounded bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 text-sm border border-red-200 dark:border-red-800/30">
+          {error}
+        </div>
+      )}
       <form onSubmit={handleCreate} className="flex flex-col sm:flex-row gap-3">
         <input
           className="flex-1 px-4 py-2.5 rounded-lg border border-black/10 dark:border-white/10 bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md text-sm outline-none focus:ring-2 focus:ring-[#009f8f]/30"
@@ -90,8 +110,8 @@ export default function DashboardsIndexPage() {
           placeholder="New dashboard name…"
           maxLength={200}
         />
-        <button 
-          type="submit" 
+        <button
+          type="submit"
           disabled={creating || !name.trim()}
           className="px-6 py-2.5 rounded-lg bg-gradient-to-br from-[#ff6d4d] to-[#2453ff] text-white font-semibold transition-all hover:opacity-90 disabled:opacity-50"
         >
@@ -100,15 +120,22 @@ export default function DashboardsIndexPage() {
       </form>
       <ul className="flex flex-col gap-3">
         {dashboards.length === 0 && (
-          <li className="text-center text-zinc-500 py-12 bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md rounded-xl border border-dashed border-black/10 dark:border-white/10">No dashboards yet.</li>
+          <li className="text-center text-zinc-500 py-12 bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md rounded-xl border border-dashed border-black/10 dark:border-white/10">
+            No dashboards yet.
+          </li>
         )}
         {dashboards.map((dashboard) => (
-          <li key={dashboard.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl border border-black/10 dark:border-white/10 bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md shadow-sm transition-all hover:shadow-md">
+          <li
+            key={dashboard.id}
+            className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl border border-black/10 dark:border-white/10 bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md shadow-sm transition-all hover:shadow-md"
+          >
             <Link
               href={`/dashboards/${dashboard.id}`}
-              className="flex flex-col flex-1"
+              className="flex flex-col flex-1 min-w-0"
             >
-              <span className="font-semibold text-lg">{dashboard.name}</span>
+              <span className="font-semibold text-lg truncate">
+                {dashboard.name}
+              </span>
               <span className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
                 updated {new Date(dashboard.updated_at).toLocaleString()}
               </span>
@@ -116,13 +143,54 @@ export default function DashboardsIndexPage() {
             <button
               type="button"
               className="px-4 py-2 rounded-lg text-sm font-medium border border-red-200 dark:border-red-800/50 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors self-start sm:self-center"
-              onClick={() => void handleDelete(dashboard.id)}
+              onClick={() => setPendingDelete(dashboard)}
             >
               Delete
             </button>
           </li>
         ))}
       </ul>
+
+      {pendingDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+          onClick={() => !deleting && setPendingDelete(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 shadow-2xl p-6"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <h2 className="text-lg font-bold mb-2">Delete dashboard?</h2>
+            <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-6">
+              This will permanently delete{" "}
+              <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                {pendingDelete.name}
+              </span>
+              . This action cannot be undone.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setPendingDelete(null)}
+                disabled={deleting}
+                className="px-4 py-2 rounded-lg text-sm font-semibold border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDelete()}
+                disabled={deleting}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-red-600 hover:bg-red-700 text-white transition-colors disabled:opacity-50"
+              >
+                {deleting ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
