@@ -152,8 +152,9 @@ def test_ingest_messages_skips_invalid() -> None:
         StreamMessage(id="m2", event={"not": "an event"}),
     ]
     agg = WindowAggregator(grace_seconds=0)
-    accepted = ingest_messages(messages, agg)
+    accepted, skipped_ids = ingest_messages(messages, agg)
     assert accepted == 1
+    assert skipped_ids == ["m2"]
     rows, ack_ids = agg.close_due(bucket + timedelta(seconds=120))
     assert len(rows) == 1
     assert ack_ids == ["m1"]

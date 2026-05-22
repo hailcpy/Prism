@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import cast
+
+from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent
 
 import prism_sdk
+from prism_sdk.strands import PrismStrandsHooks
 
 
 def test_sdk_version() -> None:
@@ -55,12 +59,60 @@ class _CapturingClient(prism_sdk.PrismClient):
         self.captured.append(event)
 
 
+class _ToolEvent:
+    def __init__(self, *, result=None, exception=None) -> None:
+        self.tool_use = {
+            "toolUseId": "toolu_1",
+            "name": "web_search",
+            "input": {"query": "foo@example.com"},
+        }
+        self.invocation_state = {
+            "prism_conversation_id": "c1",
+            "prism_inference_id": "00000000-0000-7000-8000-000000000001",
+            "prism_metadata": {"source": "test"},
+        }
+        self.result = result or {"status": "success", "content": [{"text": "ok"}]}
+        self.exception = exception
+
+
 def _kwargs(metadata_value) -> dict:
     return {
         "model": "gpt-4o",
         "messages": [{"role": "user", "content": "ping"}],
         "metadata": metadata_value,
     }
+
+
+def test_strands_hooks_emit_tool_invocation_event() -> None:
+    client = _CapturingClient()
+    hooks = PrismStrandsHooks(client)
+    event = _ToolEvent()
+
+    hooks.before_tool_call(cast(BeforeToolCallEvent, event))
+    hooks.after_tool_call(cast(AfterToolCallEvent, event))
+
+    assert len(client.captured) == 1
+    captured = client.captured[0]
+    assert captured["event_type"] == "tool_invocation"
+    assert captured["conversation_id"] == "c1"
+    assert captured["inference_id"] == "00000000-0000-7000-8000-000000000001"
+    assert captured["tool_name"] == "web_search"
+    assert captured["arguments_preview"] == '{"query":"foo@example.com"}'
+    assert captured["status"] == "ok"
+    assert captured["latency_ms"] >= 0
+
+
+def test_strands_hooks_emit_tool_errors() -> None:
+    client = _CapturingClient()
+    hooks = PrismStrandsHooks(client)
+    event = _ToolEvent(exception=RuntimeError("boom"))
+
+    hooks.before_tool_call(cast(BeforeToolCallEvent, event))
+    hooks.after_tool_call(cast(AfterToolCallEvent, event))
+
+    captured = client.captured[0]
+    assert captured["status"] == "error"
+    assert captured["error"] == {"type": "RuntimeError", "message": "boom"}
 
 
 def test_callback_success_event_builds_inference_event() -> None:

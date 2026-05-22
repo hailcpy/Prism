@@ -129,17 +129,24 @@ class WindowAggregator:
         return rows, ack_ids
 
 
-def ingest_messages(messages: list[StreamMessage], aggregator: WindowAggregator) -> int:
+def ingest_messages(
+    messages: list[StreamMessage], aggregator: WindowAggregator
+) -> tuple[int, list[str]]:
     accepted = 0
+    skipped_ids: list[str] = []
     for message in messages:
+        if message.event.get("event_type") == "tool_invocation":
+            skipped_ids.append(message.id)
+            continue
         try:
             event = event_from_wire(message.event)
         except (KeyError, TypeError, ValueError) as exc:
             log.warning("dropping invalid event id=%s err=%s", message.id, exc)
+            skipped_ids.append(message.id)
             continue
         aggregator.add(message.id, event)
         accepted += 1
-    return accepted
+    return accepted, skipped_ids
 
 
 def run(
@@ -160,11 +167,15 @@ def run(
         claimed = bus.claim_pending(stream, group, consumer, min_idle_ms=PENDING_IDLE_MS, count=500)
         if claimed:
             log.info("claimed pending messages count=%s", len(claimed))
-            ingest_messages(claimed, agg)
+            _, skipped_ids = ingest_messages(claimed, agg)
+            if skipped_ids:
+                bus.ack(stream, group, skipped_ids)
 
         new_messages = bus.consume(stream, group, consumer, count=500, block_ms=1000)
         if new_messages:
-            ingest_messages(new_messages, agg)
+            _, skipped_ids = ingest_messages(new_messages, agg)
+            if skipped_ids:
+                bus.ack(stream, group, skipped_ids)
 
         rows, ack_ids = agg.close_due(datetime.now(UTC))
         if rows:

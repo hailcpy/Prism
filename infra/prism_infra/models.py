@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 InferenceStatus = Literal["ok", "error", "timeout", "cancelled"]
+ToolInvocationStatus = Literal["ok", "error"]
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,31 @@ class InferenceEvent:
     response_preview: str | None = None
     raw_payload_uri: str | None = None
     raw_payload_jsonb: dict[str, Any] | list[Any] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    sdk_version: str | None = None
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ToolErrorInfo:
+    type: str
+    message: str
+
+
+@dataclass(frozen=True)
+class ToolInvocationEvent:
+    schema_version: str
+    tool_invocation_id: str
+    conversation_id: str | None
+    inference_id: str | None
+    tool_name: str
+    status: ToolInvocationStatus
+    ts_start: datetime
+    ts_end: datetime
+    latency_ms: int
+    arguments_preview: str
+    result_preview: str | None = None
+    error: ToolErrorInfo | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     sdk_version: str | None = None
     created_at: datetime | None = None

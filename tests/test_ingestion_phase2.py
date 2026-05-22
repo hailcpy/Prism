@@ -74,6 +74,40 @@ def test_log_writer_processes_stream_messages(monkeypatch) -> None:
     assert store.logs[0].prompt_preview == "email [EMAIL] ssn [SSN]"
 
 
+def test_ingestion_accepts_tool_invocation_events(monkeypatch) -> None:
+    monkeypatch.delenv("PRISM_KEEP_RAW", raising=False)
+    bus = InMemoryBus()
+    app.state.bus = bus
+
+    response = TestClient(app).post("/v1/events:batch", json={"events": [_tool_event_payload()]})
+
+    assert response.status_code == 202
+    assert response.json()["accepted"] == 1
+    event = bus.streams["inference.logged"][0].event
+    assert event["event_type"] == "tool_invocation"
+    assert event["arguments_preview"] == '{"email":"[EMAIL]"}'
+    assert event["result_preview"] == "ssn [SSN]"
+
+
+def test_log_writer_routes_tool_invocation_events(monkeypatch) -> None:
+    monkeypatch.delenv("PRISM_KEEP_RAW", raising=False)
+    bus = InMemoryBus()
+    app.state.bus = bus
+    TestClient(app).post(
+        "/v1/events:batch", json={"events": [_event_payload(), _tool_event_payload()]}
+    )
+    messages = bus.consume("inference.logged", "cg-writer", "worker-1", count=2)
+    store = InMemoryLogStore()
+
+    accepted, rejected = process_messages(messages, bus=bus, store=store)
+
+    assert accepted == 2
+    assert rejected == 0
+    assert len(store.logs) == 1
+    assert len(store.tool_events) == 1
+    assert store.tool_events[0].tool_name == "web_search"
+
+
 def test_log_writer_can_process_claimed_pending_messages(monkeypatch) -> None:
     monkeypatch.delenv("PRISM_KEEP_RAW", raising=False)
     bus = InMemoryBus()
@@ -141,4 +175,26 @@ def _event_payload() -> dict[str, object]:
         "raw_payload": {"request": {"text": "pay with 4111 1111 1111 1111"}},
         "metadata": {"test": True},
         "sdk_version": "0.1.0",
+    }
+
+
+def _tool_event_payload() -> dict[str, object]:
+    started = datetime(2026, 5, 21, 10, 0, tzinfo=UTC)
+    ended = started + timedelta(milliseconds=12)
+    return {
+        "schema_version": "1.0",
+        "event_type": "tool_invocation",
+        "tool_invocation_id": "01935b3f-0000-7000-8000-000000000010",
+        "conversation_id": "01935b3f-0000-7000-8000-000000000002",
+        "inference_id": "01935b3f-0000-7000-8000-000000000001",
+        "tool_name": "web_search",
+        "arguments_preview": '{"email":"foo@example.com"}',
+        "result_preview": "ssn 123-45-6789",
+        "status": "ok",
+        "error": None,
+        "ts_start": started.isoformat().replace("+00:00", "Z"),
+        "ts_end": ended.isoformat().replace("+00:00", "Z"),
+        "latency_ms": 12,
+        "metadata": {"test": True},
+        "sdk_version": "0.2.0",
     }

@@ -15,8 +15,8 @@ from redis.exceptions import RedisError
 
 from ingestion_api.redaction import RegexRedactor
 from prism_infra.bus import Bus, RedisStreamsBus
-from prism_infra.events import event_to_wire
-from prism_infra.models import ErrorInfo, InferenceEvent, Usage
+from prism_infra.events import event_to_wire, tool_event_to_wire
+from prism_infra.models import ErrorInfo, InferenceEvent, ToolErrorInfo, ToolInvocationEvent, Usage
 from prism_infra.storage import JsonbRawPayloadStore, RawPayloadStore
 
 log = logging.getLogger("ingestion-api")
@@ -66,6 +66,33 @@ class EventBody(BaseModel):
     sdk_version: str | None = None
 
 
+class ToolErrorBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: str
+    message: str
+
+
+class ToolEventBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: str
+    event_type: Literal["tool_invocation"]
+    tool_invocation_id: UUID
+    conversation_id: UUID | None = None
+    inference_id: UUID | None = None
+    tool_name: str
+    arguments_preview: str = Field(max_length=500)
+    result_preview: str | None = Field(default=None, max_length=500)
+    status: Literal["ok", "error"]
+    error: ToolErrorBody | None = None
+    ts_start: datetime
+    ts_end: datetime
+    latency_ms: int = Field(ge=0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    sdk_version: str | None = None
+
+
 class RejectedEvent(BaseModel):
     index: int
     reason: str
@@ -109,9 +136,8 @@ def ingest_batch(request: Request, body: Any = BATCH_BODY) -> BatchResponse:
     for index, raw_event in enumerate(events):
         try:
             _enforce_event_size(raw_event)
-            event_body = EventBody.model_validate(raw_event)
-            event = _sanitize_event(event_body, redactor, raw_payload_store)
-            stream_ids.append(bus.publish(EVENT_STREAM, event_to_wire(event)))
+            event = _sanitize_any_event(raw_event, redactor, raw_payload_store)
+            stream_ids.append(bus.publish(EVENT_STREAM, event))
             accepted += 1
         except ValidationError as exc:
             rejected.append(RejectedEvent(index=index, reason=_validation_reason(exc)))
@@ -136,6 +162,20 @@ def _enforce_event_size(raw_event: Any) -> None:
     size = len(json.dumps(raw_event, separators=(",", ":"), default=str).encode("utf-8"))
     if size > MAX_EVENT_BYTES:
         raise ValueError(f"event exceeds {MAX_EVENT_BYTES} bytes")
+
+
+def _sanitize_any_event(
+    raw_event: Any,
+    redactor: RegexRedactor,
+    raw_payload_store: RawPayloadStore,
+) -> dict[str, Any]:
+    if isinstance(raw_event, dict) and raw_event.get("event_type") == "tool_invocation":
+        return tool_event_to_wire(
+            _sanitize_tool_event(ToolEventBody.model_validate(raw_event), redactor)
+        )
+    return event_to_wire(
+        _sanitize_event(EventBody.model_validate(raw_event), redactor, raw_payload_store)
+    )
 
 
 def _sanitize_event(
@@ -179,10 +219,36 @@ def _sanitize_event(
     )
 
 
+def _sanitize_tool_event(body: ToolEventBody, redactor: RegexRedactor) -> ToolInvocationEvent:
+    return ToolInvocationEvent(
+        schema_version=body.schema_version,
+        tool_invocation_id=str(body.tool_invocation_id),
+        conversation_id=str(body.conversation_id) if body.conversation_id else None,
+        inference_id=str(body.inference_id) if body.inference_id else None,
+        tool_name=body.tool_name,
+        arguments_preview=redactor.redact_text(body.arguments_preview) or "",
+        result_preview=redactor.redact_text(body.result_preview),
+        status=body.status,
+        error=_tool_error_from_body(body.error),
+        ts_start=body.ts_start,
+        ts_end=body.ts_end,
+        latency_ms=body.latency_ms,
+        metadata=body.metadata,
+        sdk_version=body.sdk_version,
+        created_at=datetime.now(UTC),
+    )
+
+
 def _error_from_body(error: ErrorBody | None) -> ErrorInfo | None:
     if error is None:
         return None
     return ErrorInfo(type=error.type, message=error.message, provider_code=error.provider_code)
+
+
+def _tool_error_from_body(error: ToolErrorBody | None) -> ToolErrorInfo | None:
+    if error is None:
+        return None
+    return ToolErrorInfo(type=error.type, message=error.message)
 
 
 def _validation_reason(exc: ValidationError) -> str:

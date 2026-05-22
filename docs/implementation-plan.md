@@ -175,7 +175,7 @@ async for chunk in stream:
 A wrapper requires callers to invoke `client.chat.completions.create(...)`. Agent runtimes (Strands `LiteLLMModel`) own the call site and bypass wrappers. The brief explicitly sanctions "SDK, middleware, OR wrapper." Reviewer visibility is preserved by keeping `PrismCallback` small and explicit in one file. See **ADR-0011**.
 
 ### Tool calls (agent loops)
-`PrismCallback` fires per LLM turn, not per tool execution. Tool traces are captured by a separate `prism_sdk.strands` adapter that subscribes to Strands hooks and pushes `ToolInvocationEvent`s onto the same queue. See **ADR-0012** (Proposed; deferred to a later phase).
+`PrismCallback` fires per LLM turn, not per tool execution. Tool traces are captured by a separate `prism_sdk.strands` adapter that subscribes to Strands hooks and pushes `ToolInvocationEvent`s onto the same queue. See **ADR-0012**.
 
 ---
 
@@ -366,7 +366,7 @@ Make targets: `make up`, `make down`, `make logs`, `make seed`, `make test`, `ma
 9. **ADR-0009** — SDK is fire-and-forget with a bounded queue; on overflow, drop oldest. User latency is never sacrificed for logs.
 10. **ADR-0010** — Dashboard reads pre-aggregated `metrics_minute`, populated by a dedicated `metrics-roller` consumer. Query-time aggregation is explicitly rejected.
 11. **ADR-0011** — SDK captures via a LiteLLM `CustomLogger` callback, not a call-site wrapper. Enables transparent capture inside agent runtimes (Strands) that own the LLM call site.
-12. **ADR-0012** *(Proposed)* — Tool-call traces via Strands hooks (`prism_sdk.strands.PrismStrandsHooks`). Introduces a `ToolInvocationEvent` event type and a `tool_invocations` table. Deferred to a later phase.
+12. **ADR-0012** — Tool-call traces via Strands hooks (`prism_sdk.strands.PrismStrandsHooks`). Introduces a `ToolInvocationEvent` event type and a `tool_invocations` table.
 
 ---
 
@@ -411,17 +411,17 @@ Originally three phases; collapsed because the ADR-0011 pivot to a LiteLLM callb
 - [x] Smoke test: drive chat traffic, observe rollup rows appear within 60s, dashboard updates (run with `make up` once provider keys are set).
 - **Demoable:** dashboard shows live activity as you chat.
 
-### Phase 7 — Strands agent runtime + tool hooks (1 day)
+### Phase 7 — Strands agent runtime + tool hooks (1 day) ✅
 Moves chatbot-api off direct `litellm.acompletion` to a Strands agent loop. Implements ADR-0012 (promotes it from Proposed → Accepted on completion).
 
-- [ ] Replace the `litellm.acompletion` call in `services/chatbot-api/chatbot_api/main.py` with a Strands `Agent` using `LiteLLMModel`. The existing `PrismCallback` continues to capture LLM turns transparently.
-- [ ] Define one or two demo tools (e.g. `now`, `web_search` stub) to exercise the tool path end-to-end.
-- [ ] `prism_sdk.strands.PrismStrandsHooks`: subscribes to `BeforeToolInvocation` / `AfterToolInvocation`, builds `ToolInvocationEvent`, enqueues onto the same `PrismClient` queue.
-- [ ] Ingestion: extend `/v1/events:batch` to accept both event types, discriminated by `event_type`. Apply redaction to `arguments_preview` / `result_preview`.
-- [ ] Storage: new `tool_invocations` table (partitioned same as `inference_logs`); `LogStore` gains a `write_tool_events_batch`. Soft FK to `inference_logs.id`.
-- [ ] `log-writer` worker routes by event_type.
-- [ ] Resolve the open questions in ADR-0012 (inference_id propagation, large tool-result handling).
-- [ ] Update ADR-0012 status to **Accepted** with the resolutions inline.
+- [x] Replace the `litellm.acompletion` call in `services/chatbot-api/chatbot_api/main.py` with a Strands `Agent` using `LiteLLMModel`. The existing `PrismCallback` continues to capture LLM turns transparently.
+- [x] Define one or two demo tools (e.g. `now`, `web_search` stub) to exercise the tool path end-to-end.
+- [x] `prism_sdk.strands.PrismStrandsHooks`: subscribes to `BeforeToolCallEvent` / `AfterToolCallEvent`, builds `ToolInvocationEvent`, enqueues onto the same `PrismClient` queue.
+- [x] Ingestion: extend `/v1/events:batch` to accept both event types, discriminated by `event_type`. Apply redaction to `arguments_preview` / `result_preview`.
+- [x] Storage: new `tool_invocations` table (partitioned same as `inference_logs`); `LogStore` gains a `write_tool_events_batch`. Soft FK to `inference_logs.id`.
+- [x] `log-writer` worker routes by event_type.
+- [x] Resolve the open questions in ADR-0012 (inference_id propagation, large tool-result handling).
+- [x] Update ADR-0012 status to **Accepted** with the resolutions inline.
 - **Demoable:** chat triggers a tool call; both an `inference_log` row and a correlated `tool_invocations` row land in DB.
 
 ### Phase 8 — Polish + submission (½ day)
@@ -430,7 +430,7 @@ Moves chatbot-api off direct `litellm.acompletion` to a Strands agent loop. Impl
 - [ ] Final pass on all ADRs (any decision that changed during build).
 - [ ] Submit to work@ollive.ai.
 
-**Estimate remaining from here:** ~2.5 working days (Phase 6: 1d, Phase 7: 1d, Phase 8: ½d). If Phase 7 slips (Strands streaming + LiteLLM callback edge cases, tool schema), descope to "tool capture without Strands runtime swap" — keep direct `litellm.acompletion`, drop in a manual tool-invocation emission for one demo tool.
+**Estimate remaining from here:** ~½ working day (Phase 8 polish + submission).
 
 ---
 

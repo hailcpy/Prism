@@ -6,12 +6,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from prism_infra.models import InferenceEvent, LogsQuery, MetricsQuery, MetricsRow
+from prism_infra.models import (
+    InferenceEvent,
+    LogsQuery,
+    MetricsQuery,
+    MetricsRow,
+    ToolInvocationEvent,
+)
 
 
 class InMemoryLogStore:
     def __init__(self) -> None:
         self.logs: list[InferenceEvent] = []
+        self.tool_events: list[ToolInvocationEvent] = []
         self.metrics: dict[tuple[str, str, str], MetricsRow] = {}
 
     def write_logs_batch(self, events: list[InferenceEvent]) -> None:
@@ -21,6 +28,14 @@ class InMemoryLogStore:
                 continue
             self.logs.append(event)
             seen.add(event.inference_id)
+
+    def write_tool_events_batch(self, events: list[ToolInvocationEvent]) -> None:
+        seen = {event.tool_invocation_id for event in self.tool_events}
+        for event in events:
+            if event.tool_invocation_id in seen:
+                continue
+            self.tool_events.append(event)
+            seen.add(event.tool_invocation_id)
 
     def upsert_metrics(self, rows: list[MetricsRow]) -> None:
         for row in rows:

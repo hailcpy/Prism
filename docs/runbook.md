@@ -89,11 +89,12 @@ This is also the verification script and the Loom outline.
 4. `make psql`, then `SELECT count(*), model FROM inference_logs GROUP BY model;` — expect rows split across both models.
 5. `curl http://localhost:8000/v1/metrics?from=...` — returns rollup rows for both models.
 6. Open dashboard — latency / throughput / errors charts populated for both models.
-7. **Failure test:** `docker compose stop ingestion-api`. Send 5 more chat messages. Chatbot continues to work (SDK queues events). `docker compose start ingestion-api`. Within 5s, queue drains; new rows in `inference_logs`.
-8. **PII test:** send `"my email is foo@example.com and SSN 123-45-6789"`. `SELECT prompt_preview FROM inference_logs ORDER BY created_at DESC LIMIT 1;` — preview is redacted.
-9. **Restart test:** `make down && make up`. Existing conversations load in the UI. No data loss.
+7. Ask a tool-triggering question, e.g. `"what time is it now?"`; `SELECT tool_name, status FROM tool_invocations ORDER BY created_at DESC LIMIT 1;` — expect a `now` or `web_search` row.
+8. **Failure test:** `docker compose stop ingestion-api`. Send 5 more chat messages. Chatbot continues to work (SDK queues events). `docker compose start ingestion-api`. Within 5s, queue drains; new rows in `inference_logs`.
+9. **PII test:** send `"my email is foo@example.com and SSN 123-45-6789"`. `SELECT prompt_preview FROM inference_logs ORDER BY created_at DESC LIMIT 1;` — preview is redacted.
+10. **Restart test:** `make down && make up`. Existing conversations load in the UI. No data loss.
 
-All 9 steps pass → ready to submit.
+All 10 steps pass → ready to submit.
 
 ## Common operations
 

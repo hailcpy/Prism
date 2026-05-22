@@ -16,11 +16,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
+from strands import Agent, tool
+from strands.models.litellm import LiteLLMModel
 
 import prism_sdk
 from prism_infra.models import MetricsQuery
 from prism_infra.storage import LogStore, PostgresLogStore
 from prism_sdk import PrismClient
+from prism_sdk.strands import PrismStrandsHooks
 
 MessageRole = Literal["user", "assistant", "system"]
 
@@ -209,6 +212,18 @@ class SendMessageRequest(BaseModel):
     model: str | None = None
 
 
+@tool
+def now() -> str:
+    """Return the current UTC time."""
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+@tool
+def web_search(query: str) -> str:
+    """Search the web for a query using a deterministic demo stub."""
+    return f"Demo search result for {query!r}: no live web request was made."
+
+
 app = FastAPI(title="prism-chatbot-api", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -278,14 +293,11 @@ async def send_message(
     if conversation is None:
         raise HTTPException(status_code=404, detail="conversation not found")
 
+    previous_messages = store.list_messages(conversation_id)
     user_message = store.create_message(conversation_id, "user", body.content)
     assistant_message = store.create_message(conversation_id, "assistant", "")
     model, provider = _litellm_model_and_provider(body.model or conversation.model_default)
-    messages = _llm_messages(
-        system_prompt=conversation.system_prompt,
-        history=store.list_messages(conversation_id),
-    )
-    _get_prism_client(request.app)
+    prism_client = _get_prism_client(request.app)
     inference_id = str(uuid.uuid4())
     prism_metadata = prism_sdk.metadata(
         conversation_id=conversation_id,
@@ -293,6 +305,13 @@ async def send_message(
         inference_id=inference_id,
         provider=provider,
         extra={"source": "chatbot-api"},
+    )
+    agent = _build_agent(
+        model=model,
+        system_prompt=conversation.system_prompt,
+        history=previous_messages,
+        prism_metadata=prism_metadata,
+        prism_client=prism_client,
     )
 
     async def event_stream() -> AsyncIterator[bytes]:
@@ -315,15 +334,16 @@ async def send_message(
         )
         collected: list[str] = []
         try:
-            stream = await litellm.acompletion(
-                model=model,
-                messages=messages,
-                stream=True,
-                stream_options={"include_usage": True},
-                metadata=prism_metadata,
+            stream = agent.stream_async(
+                body.content,
+                invocation_state={
+                    "prism_conversation_id": conversation_id,
+                    "prism_inference_id": inference_id,
+                    "prism_metadata": {"source": "chatbot-api"},
+                },
             )
-            async for chunk in stream:
-                delta = _stream_delta(chunk)
+            async for event in stream:
+                delta = _agent_stream_delta(event)
                 if delta:
                     collected.append(delta)
                     yield _sse("token", {"delta": delta})
@@ -360,21 +380,23 @@ def _sse(event: str, data: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
-def _stream_delta(chunk: Any) -> str:
-    if isinstance(chunk, dict):
-        choices = chunk.get("choices") or []
-        if not choices:
-            return ""
-        delta = choices[0].get("delta") or {}
-        return str(delta.get("content") or "")
-    choices = getattr(chunk, "choices", []) or []
-    if not choices:
+def _agent_stream_delta(event: Any) -> str:
+    if not isinstance(event, dict):
         return ""
-    delta = getattr(choices[0], "delta", None)
-    if delta is None:
+    data = event.get("data")
+    if isinstance(data, str):
+        return data
+    if event.get("type") != "modelStreamUpdateEvent":
         return ""
-    content = getattr(delta, "content", None)
-    return str(content or "")
+    inner = event.get("event")
+    if not isinstance(inner, dict):
+        return ""
+    if inner.get("type") != "modelContentBlockDeltaEvent":
+        return ""
+    delta = inner.get("delta")
+    if not isinstance(delta, dict) or delta.get("type") != "textDelta":
+        return ""
+    return str(delta.get("text") or "")
 
 
 def _llm_messages(*, system_prompt: str | None, history: list[Message]) -> list[dict[str, str]]:
@@ -385,6 +407,41 @@ def _llm_messages(*, system_prompt: str | None, history: list[Message]) -> list[
         if message.role in {"user", "assistant"} and message.content:
             messages.append({"role": message.role, "content": message.content})
     return messages
+
+
+def _build_agent(
+    *,
+    model: str,
+    system_prompt: str | None,
+    history: list[Message],
+    prism_metadata: dict[str, Any],
+    prism_client: PrismClient,
+) -> Agent:
+    llm = LiteLLMModel(
+        client_args={
+            "metadata": prism_metadata,
+            "stream_options": {"include_usage": True},
+        },
+        model_id=model,
+        params={"stream": True},
+    )
+    strands_history = cast(Any, _strands_messages(history))
+    return Agent(
+        model=llm,
+        messages=strands_history,
+        tools=[now, web_search],
+        system_prompt=system_prompt,
+        callback_handler=None,
+        hooks=[PrismStrandsHooks(prism_client)],
+    )
+
+
+def _strands_messages(history: list[Message]) -> list[dict[str, Any]]:
+    return [
+        {"role": message.role, "content": [{"text": message.content}]}
+        for message in history[-12:]
+        if message.role in {"user", "assistant"} and message.content
+    ]
 
 
 def _litellm_model_and_provider(model: str) -> tuple[str, str]:

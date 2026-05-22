@@ -3,11 +3,19 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Protocol
 
-from prism_infra.models import InferenceEvent, LogsQuery, MetricsQuery, MetricsRow
+from prism_infra.models import (
+    InferenceEvent,
+    LogsQuery,
+    MetricsQuery,
+    MetricsRow,
+    ToolInvocationEvent,
+)
 
 
 class LogStore(Protocol):
     def write_logs_batch(self, events: list[InferenceEvent]) -> None: ...
+
+    def write_tool_events_batch(self, events: list[ToolInvocationEvent]) -> None: ...
 
     def upsert_metrics(self, rows: list[MetricsRow]) -> None: ...
 

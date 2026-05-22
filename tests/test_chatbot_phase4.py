@@ -78,6 +78,18 @@ class FakePrismClient:
         return None
 
 
+class FakeAgent:
+    def __init__(self, chunks: list[dict[str, str]], exc: Exception | None = None) -> None:
+        self.chunks = chunks
+        self.exc = exc
+
+    async def stream_async(self, prompt: str, *, invocation_state: dict[str, Any]):
+        for chunk in self.chunks:
+            yield chunk
+        if self.exc is not None:
+            raise self.exc
+
+
 def _parse_sse(body: str) -> list[tuple[str, dict[str, Any]]]:
     events: list[tuple[str, dict[str, Any]]] = []
     for block in body.split("\n\n"):
@@ -101,21 +113,16 @@ def chatbot_client(monkeypatch):
     app.state.prism_client = FakePrismClient()
 
     chunks = [
-        {"choices": [{"delta": {"content": "he"}}]},
-        {"choices": [{"delta": {"content": "llo"}}]},
+        {"data": "he"},
+        {"data": "llo"},
     ]
     captured: dict[str, Any] = {}
 
-    async def fake_acompletion(**kwargs):
+    def fake_build_agent(**kwargs):
         captured["kwargs"] = kwargs
+        return FakeAgent(chunks)
 
-        async def iterator():
-            for chunk in chunks:
-                yield chunk
-
-        return iterator()
-
-    monkeypatch.setattr(chatbot_main.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(chatbot_main, "_build_agent", fake_build_agent)
     return TestClient(app), store, captured
 
 
@@ -139,7 +146,7 @@ def test_chatbot_streams_assistant_tokens_via_sse(chatbot_client) -> None:
     assert "".join(deltas) == "hello"
     done = next(data for event, data in events if event == "done")
     assert done["inference_id"]
-    prism_meta = captured["kwargs"]["metadata"]["prism"]
+    prism_meta = captured["kwargs"]["prism_metadata"]["prism"]
     assert prism_meta["conversation_id"] == conversation_id
     assert prism_meta["inference_id"] == done["inference_id"]
     assert prism_meta["provider"] == "openai"
@@ -164,7 +171,7 @@ def test_chatbot_routes_bedrock_application_profiles_through_converse(chatbot_cl
 
     assert response.status_code == 200
     assert captured["kwargs"]["model"] == f"bedrock/converse/{profile_arn}"
-    assert captured["kwargs"]["metadata"]["prism"]["provider"] == "bedrock"
+    assert captured["kwargs"]["prism_metadata"]["prism"]["provider"] == "bedrock"
 
 
 def test_chatbot_leaves_explicit_bedrock_converse_models_unchanged(chatbot_client) -> None:
@@ -183,7 +190,7 @@ def test_chatbot_leaves_explicit_bedrock_converse_models_unchanged(chatbot_clien
 
     assert response.status_code == 200
     assert captured["kwargs"]["model"] == model
-    assert captured["kwargs"]["metadata"]["prism"]["provider"] == "bedrock"
+    assert captured["kwargs"]["prism_metadata"]["prism"]["provider"] == "bedrock"
 
 
 def test_chatbot_does_not_persist_assistant_row_on_stream_failure(monkeypatch) -> None:
@@ -191,14 +198,10 @@ def test_chatbot_does_not_persist_assistant_row_on_stream_failure(monkeypatch) -
     app.state.chat_store = store
     app.state.prism_client = FakePrismClient()
 
-    async def fake_acompletion(**kwargs):
-        async def iterator():
-            yield {"choices": [{"delta": {"content": "partial"}}]}
-            raise RuntimeError("provider blew up")
+    def fake_build_agent(**kwargs):
+        return FakeAgent([{"data": "partial"}], RuntimeError("provider blew up"))
 
-        return iterator()
-
-    monkeypatch.setattr(chatbot_main.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(chatbot_main, "_build_agent", fake_build_agent)
     client = TestClient(app)
 
     created = client.post("/v1/conversations", json={"model_default": "gpt-4o"})
@@ -223,15 +226,10 @@ def test_chatbot_does_not_persist_assistant_row_on_empty_response(monkeypatch) -
     app.state.chat_store = store
     app.state.prism_client = FakePrismClient()
 
-    async def fake_acompletion(**kwargs):
-        async def iterator():
-            if False:
-                yield {}
-            return
+    def fake_build_agent(**kwargs):
+        return FakeAgent([])
 
-        return iterator()
-
-    monkeypatch.setattr(chatbot_main.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(chatbot_main, "_build_agent", fake_build_agent)
     client = TestClient(app)
 
     created = client.post("/v1/conversations", json={"model_default": "gpt-4o"})

@@ -7,8 +7,8 @@ import time
 from datetime import UTC, datetime
 
 from prism_infra.bus import Bus, RedisStreamsBus, StreamMessage
-from prism_infra.events import event_from_wire
-from prism_infra.models import InferenceEvent
+from prism_infra.events import event_from_wire, tool_event_from_wire
+from prism_infra.models import InferenceEvent, ToolInvocationEvent
 from prism_infra.storage import LogStore, PostgresLogStore
 
 logging.basicConfig(
@@ -35,12 +35,16 @@ def process_messages(
     group: str = GROUP,
 ) -> tuple[int, int]:
     events: list[InferenceEvent] = []
+    tool_events: list[ToolInvocationEvent] = []
     valid_message_ids: list[str] = []
     rejected_message_ids: list[str] = []
 
     for message in messages:
         try:
-            events.append(event_from_wire(message.event))
+            if message.event.get("event_type") == "tool_invocation":
+                tool_events.append(tool_event_from_wire(message.event))
+            else:
+                events.append(event_from_wire(message.event))
             valid_message_ids.append(message.id)
         except (KeyError, TypeError, ValueError) as exc:
             bus.publish(
@@ -55,12 +59,17 @@ def process_messages(
 
     if events:
         store.write_logs_batch(events)
+
+    if tool_events:
+        store.write_tool_events_batch(tool_events)
+
+    if events or tool_events:
         bus.ack(stream, group, valid_message_ids)
 
     if rejected_message_ids:
         bus.ack(stream, group, rejected_message_ids)
 
-    return len(events), len(rejected_message_ids)
+    return len(events) + len(tool_events), len(rejected_message_ids)
 
 
 def run(

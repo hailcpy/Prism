@@ -12,6 +12,7 @@ dependencies = [
     "prism-infra",
     "prism-sdk",
     "psycopg[binary]>=3.2",
+    "strands-agents[litellm]>=1.0.0",
     "uvicorn[standard]>=0.29",
 ]
 

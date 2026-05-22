@@ -35,4 +35,4 @@ What becomes easier, what becomes harder, what we'll have to revisit. Both posit
 | [0009](0009-fire-and-forget-sdk-with-bounded-queue.md) | SDK emission is fire-and-forget with bounded queue | Accepted |
 | [0010](0010-rollups-by-consumer-not-query-time.md) | Dashboard reads pre-aggregated rollups, not raw logs | Accepted |
 | [0011](0011-sdk-as-litellm-callback-supersedes-0004.md) | SDK captures via LiteLLM callback (supersedes 0004) | Accepted |
-| [0012](0012-strands-tool-hooks.md) | Tool-call traces via Strands hooks | Proposed |
+| [0012](0012-strands-tool-hooks.md) | Tool-call traces via Strands hooks | Accepted |

@@ -228,6 +228,28 @@ Query pre-aggregated rollups.
 
 ## Internal event — Redis Stream `inference.logged`
 
-Same shape as the SDK event **after PII redaction** and any payload relocation. Versioned via `schema_version`. Consumers must tolerate unknown fields (forward-compat) and treat missing optional fields as `null` (back-compat).
+Inference events use the same shape as the SDK event **after PII redaction** and any payload relocation. Tool events share the stream with `event_type: "tool_invocation"`:
+
+```json
+{
+  "schema_version": "1.0",
+  "event_type": "tool_invocation",
+  "tool_invocation_id": "uuid",
+  "conversation_id": "uuid",
+  "inference_id": "uuid",
+  "tool_name": "web_search",
+  "arguments_preview": "{\"query\":\"latest release\"}",
+  "result_preview": "first 500 chars of tool result",
+  "status": "ok",
+  "error": null,
+  "ts_start": "2026-05-21T10:00:00.123Z",
+  "ts_end": "2026-05-21T10:00:00.135Z",
+  "latency_ms": 12,
+  "metadata": {"source": "chatbot-api"},
+  "sdk_version": "0.2.0"
+}
+```
+
+`arguments_preview` and `result_preview` are redacted at ingestion and capped at 500 chars. Events are versioned via `schema_version`. Consumers must tolerate unknown fields (forward-compat) and treat missing optional fields as `null` (back-compat).
 
 Dead-letter stream: `inference.dead` — same payload plus `dead_reason` and `failed_at`.

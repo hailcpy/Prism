@@ -5,7 +5,7 @@
 | Group | Tables | Workload | Today | Future |
 |---|---|---|---|---|
 | A. App data | `conversations`, `messages` | OLTP, mutable, low volume | Postgres | Postgres (unchanged) |
-| B. Inference logs | `inference_logs` | OLAP, append-only, high volume | Postgres (partitioned) | ClickHouse + S3 (raw payloads) |
+| B. Inference logs | `inference_logs`, `tool_invocations` | OLAP, append-only, high volume | Postgres (partitioned) | ClickHouse + S3 (raw payloads) |
 | C. Rollups | `metrics_minute` | Read-optimized, denormalized | Postgres | ClickHouse materialized view |
 
 **No DB-level FK across groups.** Links between groups (e.g. `inference_logs.message_id` → `messages.id`) are soft references. This is the load-bearing decision that allows any group to migrate independently. See ADR-0008.
@@ -114,6 +114,34 @@ CREATE INDEX metrics_minute_bucket_idx ON metrics_minute (minute_bucket DESC);
 ```
 
 **Why precomputed**: dashboard queries are aggregation-heavy and frequent. Running them against the raw partitioned table on every page load is wasteful; ClickHouse migration is then incremental. (ADR-0010)
+
+### Tool invocations
+
+```sql
+CREATE TYPE tool_invocation_status AS ENUM ('ok', 'error');
+
+CREATE TABLE tool_invocations (
+  id                  UUID NOT NULL,
+  created_at          TIMESTAMPTZ NOT NULL,
+  ts_start            TIMESTAMPTZ NOT NULL,
+  ts_end              TIMESTAMPTZ NOT NULL,
+  conversation_id     UUID,       -- soft FK
+  inference_id        UUID,       -- soft FK to inference_logs.id
+  tool_name           TEXT NOT NULL,
+  status              tool_invocation_status NOT NULL,
+  error_type          TEXT,
+  error_message       TEXT,
+  latency_ms          INT NOT NULL CHECK (latency_ms >= 0),
+  arguments_preview   TEXT NOT NULL,
+  result_preview      TEXT,
+  metadata_jsonb      JSONB NOT NULL DEFAULT '{}'::jsonb,
+  sdk_version         TEXT,
+  schema_version      TEXT NOT NULL,
+  PRIMARY KEY (id, created_at)
+) PARTITION BY RANGE (created_at);
+```
+
+`tool_invocations` is partitioned by day like `inference_logs`. It deliberately has no DB-level FK to `inference_logs` because log tables must remain independently movable to ClickHouse.
 
 ---
 

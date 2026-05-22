@@ -8,7 +8,15 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from prism_infra.models import ErrorInfo, InferenceEvent, LogsQuery, MetricsQuery, MetricsRow, Usage
+from prism_infra.models import (
+    ErrorInfo,
+    InferenceEvent,
+    LogsQuery,
+    MetricsQuery,
+    MetricsRow,
+    ToolInvocationEvent,
+    Usage,
+)
 
 
 class PostgresLogStore:
@@ -59,6 +67,54 @@ class PostgresLogStore:
                   %(prompt_preview)s, %(response_preview)s, %(raw_payload_uri)s,
                   %(raw_payload_jsonb)s, %(metadata_jsonb)s, %(sdk_version)s,
                   %(schema_version)s
+                )
+                ON CONFLICT (id, created_at) DO NOTHING
+                """,
+                rows,
+            )
+
+    def write_tool_events_batch(self, events: list[ToolInvocationEvent]) -> None:
+        if not events:
+            return
+
+        rows_by_id = {event.tool_invocation_id: self._tool_event_to_row(event) for event in events}
+        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            for tool_invocation_id in sorted(rows_by_id):
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (tool_invocation_id,),
+                )
+            cur.execute(
+                """
+                SELECT id::text
+                FROM tool_invocations
+                WHERE id = ANY(%(ids)s::uuid[])
+                """,
+                {"ids": list(rows_by_id)},
+            )
+            existing_ids = {row[0] for row in cur.fetchall()}
+            rows = [
+                row
+                for tool_invocation_id, row in rows_by_id.items()
+                if tool_invocation_id not in existing_ids
+            ]
+            if not rows:
+                return
+
+            cur.executemany(
+                """
+                INSERT INTO tool_invocations (
+                  id, created_at, ts_start, ts_end, conversation_id, inference_id,
+                  tool_name, status, error_type, error_message, latency_ms,
+                  arguments_preview, result_preview, metadata_jsonb, sdk_version,
+                  schema_version
+                )
+                VALUES (
+                  %(id)s, %(created_at)s, %(ts_start)s, %(ts_end)s,
+                  %(conversation_id)s, %(inference_id)s, %(tool_name)s,
+                  %(status)s, %(error_type)s, %(error_message)s, %(latency_ms)s,
+                  %(arguments_preview)s, %(result_preview)s, %(metadata_jsonb)s,
+                  %(sdk_version)s, %(schema_version)s
                 )
                 ON CONFLICT (id, created_at) DO NOTHING
                 """,
@@ -185,14 +241,33 @@ class PostgresLogStore:
     def ensure_partitions(self, *, days_ahead: int = 1, retention_days: int = 30) -> None:
         with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
             cur.execute("SELECT ensure_inference_logs_partition(CURRENT_DATE)")
+            cur.execute("SELECT ensure_tool_invocations_partition(CURRENT_DATE)")
             for offset in range(1, days_ahead + 1):
                 cur.execute("SELECT ensure_inference_logs_partition(CURRENT_DATE + %s)", (offset,))
+                cur.execute(
+                    "SELECT ensure_tool_invocations_partition(CURRENT_DATE + %s)", (offset,)
+                )
             cur.execute(
                 """
                 SELECT inhrelid::regclass::text
                 FROM pg_inherits
                 WHERE inhparent = 'inference_logs'::regclass
                   AND inhrelid::regclass::text ~ '^inference_logs_[0-9]{8}$'
+                  AND to_date(right(inhrelid::regclass::text, 8), 'YYYYMMDD')
+                      < CURRENT_DATE - %s
+                """,
+                (retention_days,),
+            )
+            for (partition_name,) in cur.fetchall():
+                cur.execute(
+                    sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(partition_name))
+                )
+            cur.execute(
+                """
+                SELECT inhrelid::regclass::text
+                FROM pg_inherits
+                WHERE inhparent = 'tool_invocations'::regclass
+                  AND inhrelid::regclass::text ~ '^tool_invocations_[0-9]{8}$'
                   AND to_date(right(inhrelid::regclass::text, 8), 'YYYYMMDD')
                       < CURRENT_DATE - %s
                 """,
@@ -229,6 +304,27 @@ class PostgresLogStore:
             "raw_payload_jsonb": Jsonb(event.raw_payload_jsonb)
             if event.raw_payload_jsonb is not None
             else None,
+            "metadata_jsonb": Jsonb(event.metadata),
+            "sdk_version": event.sdk_version,
+            "schema_version": event.schema_version,
+        }
+
+    def _tool_event_to_row(self, event: ToolInvocationEvent) -> dict[str, Any]:
+        created_at = event.created_at or datetime.now(UTC)
+        return {
+            "id": event.tool_invocation_id,
+            "created_at": created_at,
+            "ts_start": event.ts_start,
+            "ts_end": event.ts_end,
+            "conversation_id": event.conversation_id,
+            "inference_id": event.inference_id,
+            "tool_name": event.tool_name,
+            "status": event.status,
+            "error_type": event.error.type if event.error else None,
+            "error_message": event.error.message if event.error else None,
+            "latency_ms": event.latency_ms,
+            "arguments_preview": event.arguments_preview,
+            "result_preview": event.result_preview,
             "metadata_jsonb": Jsonb(event.metadata),
             "sdk_version": event.sdk_version,
             "schema_version": event.schema_version,
