@@ -1,214 +1,125 @@
-# Architecture
+# Architecture Notes
 
-## Context
-
-Prism is a takehome for ollive.ai. The brief: build a lightweight inference logging + ingestion system for an LLM application — a chatbot, an SDK that wraps LLM calls, an ingestion pipeline, and a database. The rubric explicitly calls out *schema design and practical tradeoffs*, so the architecture is designed to demonstrate judgment, not just code volume.
-
-### In-scope bonuses
-Multi-provider, streaming responses, dashboards, Docker Compose one-command setup, PII redaction, event-based architecture.
-
-### Out-of-scope bonuses
-k8s self-hosted deploy and full resume UX. Basic in-flight cancellation is part of Phase 9.
-
-### Locked decisions (see `adr/` for rationale)
-- **Stack:** Python everywhere — FastAPI services, LiteLLM provider abstraction, React/Next.js for chatbot UI. (ADR-0001)
-- **Storage:** Single Postgres now, engineered for clean migration to Postgres + ClickHouse + S3 without refactoring callers. (ADR-0002)
-- **Event bus:** Redis Streams, behind a `Bus` interface. (ADR-0003)
+Operator-facing notes that go deeper than the top-level [`README.md`](../README.md). Four sections: ingestion flow, logging strategy, scaling considerations, failure handling assumptions. The README is the entry point; this file is the only doc under `docs/`.
 
 ---
 
-## 1. Product scope
+## 1. Ingestion flow
 
-A working slice with these capabilities:
+The hot path of an LLM call:
 
-1. **Chatbot UI** — multi-turn chat, short context window, model selector (OpenAI / Anthropic / Gemini via LiteLLM), streaming token-by-token responses, and in-flight cancellation.
-2. **Python SDK** (`prism-sdk`) — wraps LiteLLM, captures metadata, emits log events fire-and-forget to ingestion.
-3. **Ingestion API** — FastAPI; validates SDK payloads, redacts PII, publishes to Redis Streams.
-4. **Workers** consuming Redis Streams:
-   - `log-writer` — batched inserts into `inference_logs`.
-   - `metrics-roller` — 60-second rollups into `metrics_minute` for the dashboard.
-5. **Dashboard** — read-only page showing latency p50/p95, throughput, error rate, token usage per model. Reads `metrics_minute`, not raw logs.
-6. **Conversations API** — list conversations and messages (chatbot needs this to render history).
-7. **Credential Settings** — single-tenant provider credentials stored in Postgres, encrypted with Fernet at rest. See ADR-0014.
-8. **Docker Compose** — one command brings the whole system up.
+```
+Chatbot UI ──SSE──► Chatbot API ──LiteLLM──► Provider
+                         │
+                         │  (prism-sdk, in-process)
+                         ▼
+                    bounded queue
+                         │
+                         │  fire-and-forget HTTP, batched
+                         ▼
+                  Ingestion API  ──► PII redact ──► validate ──► XADD
+                                                                   │
+                                                  inference.logged │ (Redis Stream)
+                                                                   │
+                                          ┌────────────────────────┴────────────────────────┐
+                                          ▼                                                 ▼
+                                    log-writer (cg-writer)                       metrics-roller (cg-roller)
+                                    batch 1000 or 5s                             60s tumbling windows
+                                    INSERT ... ON CONFLICT DO NOTHING            REPLACE UPSERT per (bucket, model, provider)
+                                          │                                                 │
+                                          ▼                                                 ▼
+                                    inference_logs (partitioned)                       metrics_minute
+                                                                                            ▲
+                                                                     metrics-reconciler ────┘
+                                                                     (cron, 5 min, recomputes from inference_logs)
+```
 
-**Explicit non-goals:** auth/multi-tenancy, k8s, eval/replay, prompt management, RAG, cost-per-call pricing UI, full resume UX.
+Key properties:
 
----
+1. **Caller never blocks on logging.** The chatbot API returns the SSE stream regardless of what the SDK queue or ingestion is doing.
+2. **Trust boundary is the ingestion API.** PII redaction (regex over `prompt_preview`, `response_preview`, and every string inside `raw_payload`) and Pydantic validation happen *before* `XADD`. The bus and downstream workers never see unredacted text.
+3. **Mixed-validity batches always return `202`** with `accepted` count and a `rejected: [{index, reason}]` array. Only fully malformed bodies return `4xx`.
+4. **Two consumer groups, one stream.** `cg-writer` and `cg-roller` advance independently. Adding a third consumer (cost, deep PII scan, eval sampler) is a deployment change, not a code change to the writer.
+5. **Reconciler is the source of truth for rollups.** The roller is fast and approximate; the reconciler recomputes the last N buckets directly from `inference_logs` and `UPSERT`-replaces them. Because the roller's UPSERT is also REPLACE-shaped, the two paths converge to the same row.
+6. **Single roller per bucket today.** REPLACE semantics are only safe when one consumer owns a given bucket. With Redis consumer groups + one `metrics-roller` replica, every event for a `(bucket, model, provider)` lands in the same in-memory window — correct by construction. Running multiple roller replicas without stream-key sharding would let last-writer-wins discard a partial aggregate; the reconciler corrects it within 5 min, but the in-window read is wrong until then. See scaling table for the sharding path.
 
-## 2. Core entities
+### Ingestion HTTP contract (summary)
 
-| Entity | Purpose | Lives in (today / future) |
+Full schema in code; the contract a reader needs to know:
+
+- **Endpoint:** `POST /v1/events:batch`, body `{events: InferenceEvent[]}`. Soft limit 100/req, hard 500.
+- **Event identity:** caller-generated `id` (uuid7 recommended). `inference_logs` PK is `(id, created_at)` with `ON CONFLICT DO NOTHING`, so duplicate IDs are idempotent — safe for SDK replay after timeouts.
+- **Required fields:** `id`, `ts_start`, `ts_end`, `model`, `provider`, `status`, `latency_ms`, `schema_version`. Everything else is optional.
+- **Status taxonomy:** `ok | error | timeout | cancelled`.
+- **Responses:** `202` with `{accepted: int, rejected: [{index, reason}], stream_ids: [...]}` on partial validity. `400` only for un-parseable bodies. `503` when Redis is unreachable — SDK retries with backoff.
+- **Retry after partial accept:** the SDK retries only the events the server `rejected` (it has the indexes). Already-accepted events are not re-sent; if they are, the DB dedupes on `(id, created_at)`.
+
+### Operational defaults
+
+| Knob | Env / default | Range we've validated |
 |---|---|---|
-| `Conversation` | Chat session. Owns messages. Has model/system-prompt defaults. | Postgres `conversations` / unchanged |
-| `Message` | One turn (user or assistant) in a conversation. User-visible chat history. | Postgres `messages` / unchanged |
-| `ProviderCredential` | Single-tenant saved provider secrets and non-secret metadata. Secrets encrypted by Fernet. | Postgres `provider_credentials` / unchanged until auth exists |
-| `InferenceLog` | One LLM call. Latency, tokens, status, model, provider, request/response previews. Append-only. | Postgres `inference_logs` (partitioned) / **ClickHouse** later |
-| `RawPayload` | Full request + response JSON. Large, rarely read. | Postgres `inference_logs.raw_payload_jsonb` today / **S3 referenced by `raw_payload_uri`** later |
-| `MetricsMinute` | Per-(minute, model, provider) rollup: count, p50/p95 latency, errors, token sums. | Postgres `metrics_minute` / **ClickHouse materialized view** later |
-| `PIIRedactionRule` | Regexes + provider hooks (email/phone/SSN/credit-card). Code, not data. | Code / unchanged |
-
-**Critical invariant:** `Conversation` and `Message` are *app data* (mutable, low volume, OLTP). `InferenceLog`, `RawPayload`, `MetricsMinute` are *observability data* (append-only, high volume, OLAP). They never join on the write path. The link from log to message is `inference_logs.message_id` — a **soft FK** (no DB constraint) so future migration of the logs group doesn't require constraint surgery. See ADR-0008.
-
----
-
-## 3. Service boundaries
-
-Five processes plus the UI:
-
-```
-┌──────────────┐      ┌──────────────┐
-│  Chatbot UI  │──────│ Chatbot API  │──────► LiteLLM ──► Provider
-│ (Next.js)    │ SSE  │ (FastAPI)    │   ▲
-└──────────────┘      └──────┬───────┘   │ (prism-sdk wraps this call)
-                             │
-                             │ (sdk fire-and-forget HTTP)
-                             ▼
-                      ┌──────────────┐
-                      │  Ingestion   │── XADD ──► Redis Streams: inference.logged
-                      │   API        │                       │
-                      │ (FastAPI)    │            ┌──────────┴──────────┐
-                      └──────────────┘            ▼                     ▼
-                                            ┌──────────┐         ┌──────────────┐
-                                            │log-writer│         │metrics-roller│
-                                            │ (cg-w)   │         │   (cg-r)     │
-                                            └────┬─────┘         └──────┬───────┘
-                                                 ▼                      ▼
-                                          inference_logs           metrics_minute
-                                            (Postgres)               (Postgres)
-```
-
-**Why this split:**
-- Chatbot API is the only thing that talks to LiteLLM. The SDK is inside it.
-- Ingestion API is the **trust boundary**: validation and PII redaction happen here, before anything hits the bus. Nothing past the bus is allowed to see raw PII. (ADR-0006)
-- Two workers (not one), because they have different batching windows and failure modes — writer batches by size/time, roller by tumbling window.
-- `inference_logs` and `metrics_minute` are written **only** by workers, never by the ingestion API. This is the seam that lets us swap to ClickHouse later by replacing the worker's sink, not the API. (ADR-0005)
+| Redis stream cap | `MAXLEN ~ 1_000_000` on `XADD` | OK to 5M on a single broker with default `maxmemory` |
+| Writer batch | 1000 events or 5s | 100–5000 / 1–30s |
+| Roller window | 60s tumbling + 5s grace | grace 1–30s |
+| Reconciler interval | 5 min, replays last 15 min | replay 5–60 min; longer = more catch-up after outage |
+| `XCLAIM` visibility timeout | 30s | 10–120s |
+| Writer DLQ threshold | 5 retries → `inference.dead` | 3–10 |
+| `PARTITION_RETENTION_DAYS` | 30 | 7–90 |
+| SDK `flush_interval_ms` | 200ms | 50–1000ms (smaller = lower loss on `kill -9`, more HTTP overhead) |
+| SDK queue cap | 10 000 events | 1k–100k
 
 ---
 
-## 4. SDK public API design
+## 2. Logging strategy
 
-See [`api-contracts.md`](api-contracts.md#sdk-public-api) for the full surface. Headline points:
+What we log, where, and why exactly that.
 
-- Importing `prism_sdk` is the **only** way the chatbot talks to LiteLLM. There is no `import litellm` anywhere outside the SDK.
-- Fire-and-forget: the user-facing call never waits for ingestion. Bounded in-memory queue + background flusher. (ADR-0009)
-- Streaming emits **one** log event at stream completion, with TTFT + total latency + final status. No per-token events. (ADR-0007)
-- We wrap LiteLLM, we do not use LiteLLM's `success_callback`. Visibility of instrumentation is the point. (ADR-0004)
-
----
-
-## 5. Ingestion pipeline design
-
-### Stage 1 — Ingestion API (`POST /v1/events:batch`)
-
-- Accepts an array of `InferenceEvent`. Soft limit 100/req, hard 500.
-- Pydantic validation at the boundary. Mixed valid/invalid batches return a single `202` with an `accepted` count and a `rejected: [{index, reason}]` array. There is no `422` path for batches; only fully malformed requests (not JSON, missing `events`) return `4xx`.
-- **PII redaction here, on every text-bearing field.** Email, phone, SSN, credit-card regexes scrub `prompt_preview`, `response_preview`, **and (when present) every string field inside `raw_payload`**. `raw_payload` is then **dropped entirely** before publish unless `PRISM_KEEP_RAW=true` is explicitly set (debug only; logs a loud warning at startup). Nothing past the bus ever sees an unredacted prompt, response, or raw payload — by construction. (ADR-0006)
-- `XADD` each redacted event to Redis stream `inference.logged`.
-- Returns `202` with stream IDs and per-event reject reasons.
-
-**Failure modes:**
-- Redis down → return `503`; SDK retains the event in its queue and retries with backoff.
-- Malformed request body → `400`. Per-event validation failures appear in the `rejected` array of a `202` response (others in the batch are still published).
-
-### Stage 2 — `log-writer` worker
-
-- Consumer group `cg-writer` on `inference.logged`.
-- Buffers up to 1000 events or 5s.
-- Bulk insert into `inference_logs` using `INSERT ... ON CONFLICT (id, created_at) DO NOTHING`. Replayed or `XCLAIM`ed events become no-ops at the DB; **`inference_logs` is dedupe-safe by primary key**.
-- `XACK` after the bulk insert returns. Pending entries are `XCLAIM`ed after visibility timeout and retried — duplicate inserts are harmless thanks to `ON CONFLICT DO NOTHING`.
-- After 5 retries → moved to `inference.dead` stream + alert log line.
-
-### Stage 3 — `metrics-roller` worker
-
-The roller is the **hot path** for the dashboard. It is best-effort and explicitly **not** the source of truth; the reconciler in Stage 4 is.
-
-- Consumer group `cg-roller` on the same stream.
-- Maintains in-memory tumbling 60s windows keyed by `(minute_bucket, model, provider)`.
-- Events stay **un-XACKed** until their window closes (i.e. real-world clock passes `bucket + 60s + grace`, default grace 5s).
-- On window close, for each `(model, provider)` in that bucket, the worker writes a **REPLACE** row, not an increment:
-  ```sql
-  INSERT INTO metrics_minute (minute_bucket, model, provider, count, error_count, latency_p50_ms, latency_p95_ms, prompt_tokens_sum, completion_tokens_sum)
-  VALUES (...)
-  ON CONFLICT (minute_bucket, model, provider) DO UPDATE SET
-    count = EXCLUDED.count,
-    error_count = EXCLUDED.error_count,
-    latency_p50_ms = EXCLUDED.latency_p50_ms,
-    latency_p95_ms = EXCLUDED.latency_p95_ms,
-    prompt_tokens_sum = EXCLUDED.prompt_tokens_sum,
-    completion_tokens_sum = EXCLUDED.completion_tokens_sum;
-  ```
-  Because the UPSERT *replaces* (does not increment), a worker crash and replay produces the same row, not a doubled one.
-- Then `XACK`s every event that fed that window.
-- **Late events** (events arriving after a bucket was closed) are accepted but bypass the in-memory aggregator; they trigger a reconciler run for that bucket via Stage 4.
-
-### Stage 4 — `metrics-reconciler` (source of truth)
-
-A lightweight job (cron container, every 5 min) that recomputes the last *N* closed minute-buckets directly from `inference_logs` and `UPSERT`-replaces them into `metrics_minute`. This is the canonical, idempotent path:
-
-```sql
-INSERT INTO metrics_minute (minute_bucket, model, provider, count, error_count, ...)
-SELECT date_trunc('minute', created_at), model, provider,
-       count(*), count(*) FILTER (WHERE status <> 'ok'),
-       percentile_disc(0.5) WITHIN GROUP (ORDER BY latency_ms),
-       percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms),
-       sum(prompt_tokens), sum(completion_tokens)
-FROM inference_logs
-WHERE created_at >= now() - interval '15 minutes'
-GROUP BY 1, 2, 3
-ON CONFLICT (minute_bucket, model, provider) DO UPDATE SET ...; -- REPLACE, not add
-```
-
-Because the reconciler reads `inference_logs` (which is itself dedupe-safe via Stage 2), the rollups it produces are deterministic regardless of how many times the roller or reconciler ran before. (ADR-0010)
-
-### Why two consumer groups, not one writer
-Each consumer owns a side-effect independently. Adding a `pii-deep-scanner`, `cost-calculator`, or `eval-sampler` is a new consumer, not a writer change. This is the actual event-driven story. (ADR-0010)
+- **One log event per LLM call.** Streamed calls emit a single event at stream completion, carrying `ts_start`, `ts_end`, `ttft_ms`, `latency_ms`, token counts, and final status (`ok` / `error` / `timeout` / `cancelled`). What this gives up, explicitly: mid-stream stall detection, inter-token throughput curves, partial-output debugging on `cancelled` streams, and detecting provider-side degradation that recovers before completion. We accept that loss because per-token capture would 100× event volume, and TTFT + total latency cover the perceived-UX signal. Per-token capture is a *new* event type and table (see future improvements), not an extension of `inference_logs`.
+- **Three timestamps on every row:** `ts_start`/`ts_end` are SDK-observed (authoritative for latency); `created_at` is set by the ingestion API (authoritative for partitioning and dashboard time-range queries — no client clock-skew surprises). Tradeoff: during an SDK-retry or worker backlog, an event lands in a *later* `created_at` bucket than when the call actually happened, so the dashboard's per-minute view is skewed during incidents. For incident forensics, query `inference_logs` by `ts_start` directly; the rollup is the operational signal, not the audit trail.
+- **Soft FK to messages.** `inference_logs.message_id` links to the assistant message, but is not a DB constraint. Deleting a conversation does not nuke audit history; observability outlives app data on purpose. The cost is explicit: orphan log rows after deletion, no DB-level cascade, and GDPR / CCPA "right to erasure" requests must run as an application-level job that scans logs by `conversation_id` / `message_id` (and `metadata_jsonb`) — not a `DELETE CASCADE`. We accept this for audit fidelity; production deployments would add a `purge-by-subject` worker.
+- **Redaction at ingest, not at the SDK.** The SDK is dumb — it captures and ships. Centralizing redaction at the trust boundary means there is exactly one place to audit, and the redactor implementation can be swapped (regex → Presidio → model-based) behind the `Redactor` interface without touching every caller.
+- **Raw payloads — exact contract.** Default is `PRISM_KEEP_RAW=false`: ingestion redacts previews, then drops `raw_payload` entirely before publish. `raw_payload_jsonb` stays `NULL`. With `PRISM_KEEP_RAW=true` (debug only, loud startup warning), the redacted payload is published and persisted to `raw_payload_jsonb`. Readers always check `if raw_payload_uri: fetch_from(uri) else: read_jsonb` — so flipping writes to S3 later is a write-path change with zero reader churn. Retention follows the partition retention window (`PARTITION_RETENTION_DAYS`, default 30d) — no separate raw-payload TTL.
+- **Pre-trust-boundary surfaces still see raw text.** Redaction is at ingest, which means the SDK process, the HTTP request body, the ingestion handler's request-scope memory, and any crash dump from either process can contain unredacted prompts/responses. Mitigations the operator owns: TLS between SDK and ingestion (compose binds to `127.0.0.1` for the demo); access control on host logs and core dumps; never enable framework request-body logging on the ingestion API.
+- **Rollups are pre-aggregated, never query-time.** The `/metrics` dashboard reads `metrics_minute`. Cross-bucket percentiles (which you can't average from per-minute percentiles without lying) go through a typed `LogStore` method that maps to `percentile_cont` today and `quantile()` on ClickHouse later.
+- **Dedupe is structural.** `inference_logs` PK is `(id, created_at)` with `INSERT ... ON CONFLICT DO NOTHING`. `XCLAIM` retries and reconciler replays are no-ops at the DB. `metrics_minute` UPSERT is REPLACE (not increment), so concurrent writers for the same bucket converge instead of double-counting.
 
 ---
 
-## 6. Storage design
+## 3. Scaling considerations
 
-Full DDL and partition strategy in [`schema.md`](schema.md). Headline:
+What breaks first, and what to do when it does.
 
-- **Three table groups, even inside one Postgres:**
-  - **A. App data** — `conversations`, `messages` (OLTP, mutable).
-  - **B. Inference logs** — `inference_logs`, partitioned daily by `created_at` (OLAP, append-only).
-  - **C. Rollups** — `metrics_minute` (read-optimized, denormalized).
-- **No FKs between groups.** Links are soft (e.g. `inference_logs.message_id`). This means any group can move to a different store without unwinding DB constraints. (ADR-0008)
-- **Provider credentials are Group A app data.** The API returns only redacted credential summaries; provider keys are not stored in the browser or sent as per-request headers once Phase 9 lands. (ADR-0014)
-- **`raw_payload_uri` exists from day one** alongside `raw_payload_jsonb`. Today, writes go to jsonb; readers check `if uri: fetch_from(uri) else: read_jsonb`. When S3 lands, writes flip to the URI column. Readers don't change. (ADR-0002)
-- **All log table access goes through a `LogStore` interface.** Today: `PostgresLogStore`. Future: `ClickHouseLogStore` + `S3RawPayloadStore` slot in via DI; business logic doesn't move. (ADR-0005)
+| Layer | Today | First bottleneck | Lever |
+|---|---|---|---|
+| Chatbot API | Single container, stateless | CPU on SSE fan-out around ~1k concurrent streams | Horizontal scale-out behind an L7 LB; sticky-by-conversation only needed for cancel routing |
+| Ingestion API | Single container, stateless | PII regex CPU (cheap; ~100s RPS per core) | Horizontal scale-out; regex is embarrassingly parallel |
+| Redis Streams | Single broker, single stream `inference.logged`, `MAXLEN ~ 1_000_000` | Memory if workers stall for hours; a single stream is one logical key, so vertical scale only | Shard the stream first (`inference.logged.{0..N}` keyed by `hash(conversation_id)`); only then does Redis Cluster help. Kafka was the design target — partitions/offsets/keys reshape consumer-group code, so the `Bus` swap is non-trivial, not a drop-in |
+| `log-writer` | Single consumer in `cg-writer` | Insert throughput at ~10M rows/day on one PG | Add consumers to the same group (Redis Streams distributes pending entries); inserts pipeline linearly because `(id, created_at)` ON CONFLICT makes them commutative |
+| `metrics-roller` | **Single consumer in `cg-roller`, intentionally** | One-roller throughput ceiling | REPLACE semantics require single-owner-per-bucket. To scale: shard the stream by `(model, provider)` or `hash(conversation_id)` and run one roller per shard. Running N rollers on one stream silently loses partial aggregates until the reconciler corrects them |
+| `inference_logs` (Postgres) | Daily range partitions, retention 30d | ~10M rows/day before query times tail off | ClickHouse via `LogStore` swap; `raw_payload_uri` already exists for the S3 cutover |
+| `metrics_minute` | Single table; one row per (minute, model, provider) | Doesn't break at demo scale | ClickHouse materialized view when the logs move |
+| Dashboard reads | Hit pre-aggregated rollup, not raw logs | Window queries are O(rows in window) on a tiny table | Already cheap; further wins from `SummingMergeTree` on ClickHouse |
 
----
-
-## 7. API contracts
-
-See [`api-contracts.md`](api-contracts.md) for the full spec. Surfaces:
-
-- **SDK → Ingestion:** `POST /v1/events:batch`
-- **Chatbot UI ↔ Chatbot API:**
-  - `GET /v1/providers`
-  - `GET|POST|PATCH|DELETE /v1/credentials`
-  - `POST /v1/conversations`
-  - `GET /v1/conversations/:id/messages`
-  - `POST /v1/conversations/:id/messages` (SSE for streaming)
-- **Dashboard:** `GET /v1/metrics?from=&to=&model=&provider=`
-- **Internal event:** Redis Stream `inference.logged` (versioned via `schema_version`)
+The seams are the load-bearing part. `LogStore` / `RawPayloadStore` / `Bus` interfaces are wired through the codebase today; no business logic imports `psycopg`, `redis-py`, or `boto3` directly. **But the seams don't hide query semantics:** the PG→ClickHouse swap also means moving from `ON CONFLICT DO NOTHING` to `ReplacingMergeTree` (eventual dedupe, not immediate), from `percentile_cont` to `quantile()` (approximate by default), and rewriting backfill tooling. PG→Kafka similarly reshapes the bus around offsets/partitions/keys. The interfaces buy us "no caller refactor"; they do not buy us "no design work."
 
 ---
 
-## 8. Deployment / dev setup
+## 4. Failure handling assumptions
 
-See [`runbook.md`](runbook.md) for the operator-facing version. `docker compose up` brings up:
+What's expected to fail, what we do about it, and what we explicitly accept as the cost.
 
-- `postgres` (init SQL: schemas, partition function, next-7-day partitions)
-- `redis` (Streams + general cache)
-- `chatbot-api` (FastAPI + prism-sdk)
-- `ingestion-api` (FastAPI)
-- `log-writer` worker
-- `metrics-roller` worker
-- `metrics-reconciler` cron (recomputes recent buckets from `inference_logs`)
-- `chatbot-ui` (Next.js)
-- `partition-cron` (creates tomorrow's partition nightly)
-
-`.env.example` enumerates every env var. `make up`, `make down`, `make logs`, `make seed`, `make test`, `make demo`.
+| Failure | Behavior | Assumption we're making |
+|---|---|---|
+| **Provider 5xx / timeout** | SDK records `status=error` or `timeout` with `error_type` + `provider_error_code`. Chatbot API surfaces the error to the UI and persists the partial assistant message with `status='error'`. | Provider errors are first-class observability data, not exceptions to swallow. |
+| **User cancels mid-stream** | UI aborts the `fetch`; chatbot API cancels the LiteLLM call; partial content is saved with `status='cancelled'`; one log event emitted with `status=cancelled` and `latency_ms` = time to cancel. | Cancelled streams are interesting (UX latency signal), not noise. |
+| **Ingestion API down** | SDK gets a connect/5xx error; retains the event in its bounded in-memory queue and retries with backoff. User-facing chat is unaffected. | Brief ingestion outages are recoverable in-memory; long outages overflow the queue and drop oldest. Logs are observability, not source of truth. |
+| **Redis down** | Ingestion API returns `503`; SDK retries. No partial state — events are either fully published or fully retried. | Redis is in the critical observability path; the data plane (chat) is unaffected. |
+| **SDK process killed (`kill -9`)** | Up to `flush_interval_ms` (200ms default) of queued events lost. `atexit` + explicit `client.close()` from the chatbot-api lifespan flushes on graceful shutdown. | ADR-0009 trades ≤200ms of loss on hard kills for never blocking user latency. Production would add a local disk spool. |
+| **`log-writer` crash** | Pending entries `XCLAIM`ed by another consumer after visibility timeout. `INSERT ... ON CONFLICT (id, created_at) DO NOTHING` makes retries no-ops. After 5 retries → `inference.dead` + alert log line. | Duplicates are structurally impossible at the DB; the writer is safe to restart at any time. |
+| **`metrics-roller` crash mid-window** | Events stay un-`XACK`ed; a new consumer reopens the window from raw events. Final UPSERT is REPLACE, so re-emitting the window produces the same row. If the roller misses a bucket entirely, the reconciler fills it in within 5 min. | Roller is best-effort; the reconciler is source of truth. The dashboard is allowed to be a few minutes behind during failure. |
+| **Late events** (arriving after a bucket was closed) | Accepted, bypass the in-memory aggregator, trigger a reconciler run for that bucket. | We don't promise sub-minute correctness during clock skew or worker lag; we promise eventual correctness on a 5-min boundary. |
+| **Postgres down** | Writer/roller back off and retry; ingestion API keeps publishing to Redis (bus is decoupled from the sink). | The bus absorbs DB outages up to `MAXLEN`; the dashboard goes stale but the chat keeps working. |
+| **Long worker / DB outage exceeding `MAXLEN`** | Redis silently trims oldest events. Trim count is *not* yet exposed as a metric — known gap. | Bounded memory beats unbounded backlog at demo scale. Production fix: pair Redis with an object spool or move to Kafka via the `Bus` interface. |
+| **PII regex false negative** | Unredacted text reaches the DB. | Mitigated by the `Redactor` swap to Presidio; the failure mode is bounded to text fields and never includes full raw payloads in the default config. |
+| **`PRISM_CREDS_KEY` lost / rotated** | Saved provider credentials become undecryptable; operator must delete and re-enter. | We don't auto-generate ephemeral keys at boot — that would silently brick credentials across restarts. |
+| **No auth on any API** | Compose binds every port to `127.0.0.1`. | Single-tenant local demo by design. `127.0.0.1` is a *network* boundary, not a *process* boundary: every local process and any browser session on the host can reach the credential-adjacent endpoints (`/v1/credentials`, chat APIs) and pull decrypted-at-use provider secrets. Do not run on a shared/multi-user host, and do not expose to the public internet without an auth layer in front. |

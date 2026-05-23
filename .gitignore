@@ -21,3 +21,4 @@ npm-debug.log*
 
 # Local/editor
 .DS_Store
+.docs-internal/
