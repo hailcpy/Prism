@@ -10,6 +10,7 @@ CREATE TABLE conversations (
   user_id UUID NULL,
   model_default TEXT NOT NULL,
   system_prompt TEXT,
+  title TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

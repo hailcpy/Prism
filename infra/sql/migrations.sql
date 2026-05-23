@@ -7,6 +7,9 @@
 ALTER TABLE messages
   ADD COLUMN IF NOT EXISTS metadata_jsonb JSONB NOT NULL DEFAULT '{}'::jsonb;
 
+ALTER TABLE conversations
+  ADD COLUMN IF NOT EXISTS title TEXT;
+
 DO $$
 BEGIN
   CREATE TYPE message_status AS ENUM ('pending', 'ok', 'error', 'cancelled');

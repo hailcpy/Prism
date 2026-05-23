@@ -41,6 +41,7 @@ class Conversation:
     created_at: datetime
     updated_at: datetime
     message_count: int = 0
+    title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,8 @@ class ChatStore(Protocol):
     def list_conversations(self, limit: int = 50) -> list[Conversation]: ...
 
     def get_conversation(self, conversation_id: str) -> Conversation | None: ...
+
+    def update_conversation_title(self, conversation_id: str, title: str) -> None: ...
 
     def list_messages(self, conversation_id: str) -> list[Message]: ...
 
@@ -98,6 +101,7 @@ class PostgresChatStore:
                 "ALTER TABLE messages ADD COLUMN IF NOT EXISTS metadata_jsonb JSONB "
                 "NOT NULL DEFAULT '{}'::jsonb"
             )
+            cur.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS title TEXT")
         self._ensured_schema = True
 
     def create_conversation(self, model_default: str, system_prompt: str | None) -> Conversation:
@@ -108,7 +112,7 @@ class PostgresChatStore:
                 """
                 INSERT INTO conversations (id, model_default, system_prompt)
                 VALUES (%s, %s, %s)
-                RETURNING id::text, model_default, system_prompt, created_at, updated_at
+                RETURNING id::text, model_default, system_prompt, created_at, updated_at, title
                 """,
                 (conversation_id, model_default, system_prompt),
             )
@@ -123,7 +127,7 @@ class PostgresChatStore:
             cur.execute(
                 """
                 SELECT c.id::text, c.model_default, c.system_prompt, c.created_at, c.updated_at,
-                       count(m.id)::int AS message_count
+                       c.title, count(m.id)::int AS message_count
                 FROM conversations c
                 LEFT JOIN messages m ON m.conversation_id = c.id
                 GROUP BY c.id
@@ -140,7 +144,7 @@ class PostgresChatStore:
             cur.execute(
                 """
                 SELECT id::text, model_default, system_prompt, created_at, updated_at,
-                       0 AS message_count
+                       title, 0 AS message_count
                 FROM conversations
                 WHERE id = %s
                 """,
@@ -241,6 +245,14 @@ class PostgresChatStore:
         with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM messages WHERE id = %s", (message_id,))
 
+    def update_conversation_title(self, conversation_id: str, title: str) -> None:
+        self._ensure_schema()
+        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE conversations SET title = %s, updated_at = now() WHERE id = %s",
+                (title, conversation_id),
+            )
+
 
 class CreateConversationRequest(BaseModel):
     model_default: str = "gpt-4o"
@@ -257,6 +269,11 @@ class ConversationBody(BaseModel):
     model_default: str
     updated_at: datetime
     message_count: int
+    title: str | None = None
+
+
+class UpdateConversationRequest(BaseModel):
+    title: str | None = None
 
 
 class ListConversationsResponse(BaseModel):
@@ -277,10 +294,16 @@ class ListMessagesResponse(BaseModel):
     messages: list[MessageBody]
 
 
+class ThinkingConfig(BaseModel):
+    enabled: bool = False
+    budget_tokens: int | None = None
+
+
 class SendMessageRequest(BaseModel):
     role: Literal["user"] = "user"
     content: str = Field(min_length=1)
     model: str | None = None
+    thinking: ThinkingConfig | None = None
 
 
 class ModelOption(BaseModel):
@@ -384,9 +407,30 @@ def list_conversations(request: Request) -> ListConversationsResponse:
                 model_default=conversation.model_default,
                 updated_at=conversation.updated_at,
                 message_count=conversation.message_count,
+                title=conversation.title,
             )
             for conversation in conversations
         ]
+    )
+
+
+@app.patch("/v1/conversations/{conversation_id}", response_model=ConversationBody)
+def update_conversation(
+    request: Request, conversation_id: str, body: UpdateConversationRequest
+) -> ConversationBody:
+    store = _get_store(request.app)
+    conversation = store.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    if body.title is not None:
+        store.update_conversation_title(conversation_id, body.title)
+    updated = store.get_conversation(conversation_id) or conversation
+    return ConversationBody(
+        id=updated.id,
+        model_default=updated.model_default,
+        updated_at=updated.updated_at,
+        message_count=updated.message_count,
+        title=updated.title,
     )
 
 
@@ -412,6 +456,7 @@ async def send_message(
         raise HTTPException(status_code=404, detail="conversation not found")
 
     previous_messages = store.list_messages(conversation_id)
+    is_first_turn = not any(m.role == "user" for m in previous_messages)
     model, provider = llm.provider_for_model(body.model or conversation.model_default)
     credential = _get_credential_store(request.app).get_default_credential_for_provider(provider)
     if credential is None:
@@ -438,6 +483,7 @@ async def send_message(
         prism_metadata=prism_metadata,
         prism_client=prism_client,
         credential=credential,
+        thinking=body.thinking,
     )
 
     async def event_stream() -> AsyncIterator[bytes]:
@@ -527,6 +573,16 @@ async def send_message(
         thinking_trace = "".join(thinking_collected).strip() or None
         metadata = {"thinking_trace": thinking_trace} if thinking_trace else {}
         store.update_message_content(assistant_message.id, content, status="ok", metadata=metadata)
+        if is_first_turn and conversation.title is None:
+            generated_title = await _generate_title(
+                user_content=body.content,
+                assistant_content=content,
+                fallback_model=model,
+                credential=credential,
+            )
+            if generated_title:
+                store.update_conversation_title(conversation_id, generated_title)
+                yield _sse("title", {"title": generated_title})
         yield _sse(
             "done",
             {
@@ -630,15 +686,20 @@ def _build_agent(
     prism_metadata: dict[str, Any],
     prism_client: PrismClient,
     credential: Any,
+    thinking: ThinkingConfig | None = None,
 ) -> Agent:
     client_args: dict[str, Any] = {
         "metadata": prism_metadata,
     }
     client_args.update(llm.litellm_client_args(credential))
+    params: dict[str, Any] = {"stream": True}
+    if thinking and thinking.enabled:
+        budget = thinking.budget_tokens or 4096
+        params["thinking"] = {"type": "enabled", "budget_tokens": budget}
     model_client = LiteLLMModel(
         client_args=client_args,
         model_id=model,
-        params={"stream": True},
+        params=params,
     )
     strands_history = cast(Any, _strands_messages(history))
     return Agent(
@@ -657,6 +718,42 @@ def _strands_messages(history: list[Message]) -> list[dict[str, Any]]:
         for message in history[-12:]
         if message.role in {"user", "assistant"} and message.content
     ]
+
+
+async def _generate_title(
+    *,
+    user_content: str,
+    assistant_content: str,
+    fallback_model: str,
+    credential: Any,
+) -> str | None:
+    import litellm
+
+    model = os.getenv("TITLE_GENERATION_MODEL") or fallback_model
+    user_snippet = user_content.strip()[:500]
+    assistant_snippet = assistant_content.strip()[:500]
+    prompt = (
+        "Summarize the topic of this exchange in 4-6 words. "
+        "Return only the title — no quotes, no punctuation, no prefix.\n\n"
+        f"User: {user_snippet}\n\nAssistant: {assistant_snippet}"
+    )
+    try:
+        response = await litellm.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=24,
+            temperature=0.3,
+            **llm.litellm_client_args(credential),
+        )
+        choice = response.choices[0]  # type: ignore[index]
+        text = (choice.message.content or "").strip()
+        text = text.strip("\"'`")
+        if not text:
+            return None
+        return text[:120]
+    except Exception:
+        logging.getLogger(__name__).exception("title generation failed")
+        return None
 
 
 def _fallback_models() -> list[ModelOption]:
@@ -827,6 +924,7 @@ def _conversation_from_row(row: dict[str, Any]) -> Conversation:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         message_count=row.get("message_count", 0),
+        title=row.get("title"),
     )
 
 

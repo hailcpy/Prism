@@ -88,6 +88,11 @@ class FakeChatStore:
     def delete_message(self, message_id: str) -> None:
         self.messages = [m for m in self.messages if m.id != message_id]
 
+    def update_conversation_title(self, conversation_id: str, title: str) -> None:
+        conv = self.conversations.get(conversation_id)
+        if conv is not None:
+            self.conversations[conversation_id] = replace(conv, title=title)
+
 
 class FakePrismClient:
     def install(self) -> None:

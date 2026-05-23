@@ -1,10 +1,27 @@
-.PHONY: up down init logs psql redis-cli seed install-dev lint format format-check typecheck test check demo web-rebuild web-restart web-logs web-dev web-install
+.PHONY: up down nuke restart init logs psql redis-cli seed install-dev lint format format-check typecheck test check demo web-rebuild web-restart web-logs web-dev web-install
 
+# `up` builds images and starts containers in the background.
+# Use this after a Dockerfile/lockfile change, or when adding/removing services.
 up:
 	docker compose up -d --build
 
+# `down` stops and removes containers but KEEPS named volumes
+# (postgres-data, redis-data). Your data survives.
 down:
 	docker compose down
+
+# `nuke` ALSO deletes named volumes — postgres + redis data is gone.
+# Requires explicit confirmation. Use this only when you want a clean slate.
+nuke:
+	@echo "This will DELETE all postgres and redis data (named volumes)."
+	@printf "Type 'nuke' to confirm: "; read ans; [ "$$ans" = "nuke" ] || (echo "Aborted."; exit 1)
+	docker compose down -v
+
+# `restart` reloads running services. With the source bind-mounts in
+# docker-compose.yml, this picks up Python code changes WITHOUT a rebuild.
+# Pass SERVICE=name to restart just one service.
+restart:
+	docker compose restart $(if $(SERVICE),$(SERVICE),)
 
 init:
 	docker compose restart
@@ -13,10 +30,10 @@ logs:
 	docker compose logs -f $(if $(SERVICE),$(SERVICE),)
 
 psql:
-	docker compose exec postgres psql -U prism prism
+	docker compose exec postgres psql -U $${POSTGRES_USER:-prism} $${POSTGRES_DB:-prism}
 
 redis-cli:
-	docker compose exec redis redis-cli
+	docker compose exec redis sh -c 'redis-cli -a "$$REDIS_PASSWORD"'
 
 seed:
 	@echo "seed: not implemented until Phase 4"

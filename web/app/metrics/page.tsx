@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { getModels, type ModelOption } from "@/lib/api";
 
 type Bucket = {
   minute_bucket: string;
@@ -43,8 +44,21 @@ export default function MetricsPage() {
   const [modelFilter, setModelFilter] = useState<string>("");
   const [providerFilter, setProviderFilter] = useState<string>("");
   const [buckets, setBuckets] = useState<Bucket[]>([]);
+  const [allModels, setAllModels] = useState<ModelOption[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getModels()
+      .then((m) => {
+        if (!cancelled) setAllModels(m);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     const now = new Date();
@@ -74,14 +88,16 @@ export default function MetricsPage() {
     return () => window.clearInterval(handle);
   }, [load]);
 
-  const models = useMemo(
-    () => Array.from(new Set(buckets.map((b) => b.model))).sort(),
-    [buckets],
-  );
-  const providers = useMemo(
-    () => Array.from(new Set(buckets.map((b) => b.provider))).sort(),
-    [buckets],
-  );
+  const models = useMemo(() => {
+    const fromModels = allModels.map((m) => m.id);
+    const fromBuckets = buckets.map((b) => b.model);
+    return Array.from(new Set([...fromModels, ...fromBuckets])).sort();
+  }, [allModels, buckets]);
+  const providers = useMemo(() => {
+    const fromModels = allModels.map((m) => m.provider);
+    const fromBuckets = buckets.map((b) => b.provider);
+    return Array.from(new Set([...fromModels, ...fromBuckets])).sort();
+  }, [allModels, buckets]);
 
   const seriesByModel = useMemo(() => {
     const grouped: Record<string, Bucket[]> = {};

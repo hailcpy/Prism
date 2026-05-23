@@ -187,6 +187,31 @@ def sanitize_provider_error(error: str) -> str:
     return compact[:MAX_PROVIDER_ERROR_LEN]
 
 
+_OPENAI_NON_CHAT_PATTERNS = (
+    "tts",
+    "transcribe",
+    "whisper",
+    "embedding",
+    "moderation",
+    "dall-e",
+    "image",
+    "audio",
+    "realtime",
+    "search-preview",
+    "computer-use",
+    "instruct",
+    "davinci",
+    "babbage",
+    "codex",
+)
+
+
+def _is_openai_chat_model(model_id: str) -> bool:
+    if any(pat in model_id for pat in _OPENAI_NON_CHAT_PATTERNS):
+        return False
+    return model_id.startswith(("gpt-", "chatgpt-", "o1", "o3", "o4"))
+
+
 async def _discover_openai(client: httpx.AsyncClient, api_key: str) -> list[dict[str, Any]]:
     response = await client.get(
         "https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {api_key}"}
@@ -196,6 +221,7 @@ async def _discover_openai(client: httpx.AsyncClient, api_key: str) -> list[dict
         item["id"]
         for item in response.json().get("data", [])
         if isinstance(item, dict) and isinstance(item.get("id"), str)
+        and _is_openai_chat_model(item["id"])
     )
     return [
         {

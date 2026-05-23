@@ -22,6 +22,7 @@ CREATE TABLE conversations (
   user_id         UUID NULL,                    -- nullable; no auth in scope
   model_default   TEXT NOT NULL,
   system_prompt   TEXT,
+  title           TEXT,                          -- LLM-generated after first turn; null until set
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
