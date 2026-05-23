@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import types
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -217,6 +219,14 @@ def test_chatbot_streams_and_persists_thinking_traces(monkeypatch) -> None:
                         "delta": {"type": "thinkingDelta", "text": "then answer"},
                     }
                 },
+                {"reasoning": True, "reasoningText": " with strands"},
+                {
+                    "event": {
+                        "contentBlockDelta": {
+                            "delta": {"reasoningContent": {"text": " and bedrock"}}
+                        }
+                    }
+                },
                 {"data": "done"},
             ]
         )
@@ -233,10 +243,113 @@ def test_chatbot_streams_and_persists_thinking_traces(monkeypatch) -> None:
 
     events = _parse_sse(response.text)
     thinking = [data["delta"] for event, data in events if event == "thinking"]
-    assert "".join(thinking) == "plan then answer"
+    assert "".join(thinking) == "plan then answer with strands and bedrock"
 
     messages = client.get(f"/v1/conversations/{conversation_id}/messages").json()["messages"]
-    assert messages[1]["thinking_trace"] == "plan then answer"
+    assert messages[1]["thinking_trace"] == "plan then answer with strands and bedrock"
+
+
+def test_chatbot_streams_tool_calls_via_sse(monkeypatch) -> None:
+    store = FakeChatStore()
+    app.state.chat_store = store
+    app.state.prism_client = FakePrismClient()
+
+    def fake_build_agent(**kwargs):
+        return FakeAgent(
+            [
+                {
+                    "type": "tool_use_stream",
+                    "current_tool_use": {
+                        "toolUseId": "toolu_1",
+                        "name": "web_search",
+                        "input": '{"query":"latest prism"}',
+                    },
+                },
+                {
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "toolResult": {
+                                    "toolUseId": "toolu_1",
+                                    "status": "success",
+                                    "content": [{"text": "Top result"}],
+                                }
+                            }
+                        ],
+                    }
+                },
+                {"data": "done"},
+            ]
+        )
+
+    monkeypatch.setattr(chatbot_main, "_build_agent", fake_build_agent)
+    client = TestClient(app)
+
+    created = client.post("/v1/conversations", json={"model_default": "gpt-4o"})
+    conversation_id = created.json()["conversation_id"]
+    response = client.post(
+        f"/v1/conversations/{conversation_id}/messages",
+        json={"role": "user", "content": "search", "model": "gpt-4o"},
+    )
+
+    events = _parse_sse(response.text)
+    tool_events = [data for event, data in events if event == "tool_call"]
+    assert tool_events == [
+        {
+            "id": "toolu_1",
+            "name": "web_search",
+            "status": "running",
+            "arguments_preview": '{"query":"latest prism"}',
+        },
+        {
+            "id": "toolu_1",
+            "name": "web_search",
+            "status": "ok",
+            "result_preview": "Top result",
+        },
+    ]
+
+
+def test_web_search_formats_results(monkeypatch) -> None:
+    class FakeDDGS:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def text(self, query: str, **kwargs):
+            assert query == "prism"
+            assert kwargs["max_results"] == 1
+            return [
+                {
+                    "title": "Prism",
+                    "href": "https://example.test/prism",
+                    "body": "A result",
+                }
+            ]
+
+    monkeypatch.setitem(sys.modules, "ddgs", types.SimpleNamespace(DDGS=FakeDDGS))
+
+    result = chatbot_main.web_search(" prism ", max_results=1)
+
+    assert "Top 1 web results for 'prism':" in result
+    assert "https://example.test/prism" in result
+    assert "A result" in result
+
+
+def test_web_search_reports_failures(monkeypatch) -> None:
+    class FakeDDGS:
+        def __enter__(self):
+            raise RuntimeError("offline")
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setitem(sys.modules, "ddgs", types.SimpleNamespace(DDGS=FakeDDGS))
+
+    assert chatbot_main.web_search("prism").startswith("web_search failed: offline")
 
 
 def test_chatbot_routes_bedrock_application_profiles_through_converse(chatbot_client) -> None:

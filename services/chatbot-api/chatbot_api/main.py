@@ -364,7 +364,10 @@ def web_search(query: str, max_results: int = 5) -> str:
     query = (query or "").strip()
     if not query:
         return "web_search: empty query"
-    limit = max(1, min(int(max_results or 5), 10))
+    try:
+        limit = max(1, min(int(max_results or 5), 10))
+    except (TypeError, ValueError):
+        limit = 5
     try:
         with DDGS() as ddgs:
             hits = list(ddgs.text(query, max_results=limit))
@@ -377,7 +380,7 @@ def web_search(query: str, max_results: int = 5) -> str:
     for i, hit in enumerate(hits, 1):
         title = (hit.get("title") or "").strip()
         url = (hit.get("href") or hit.get("url") or "").strip()
-        body = (hit.get("body") or "").strip()
+        body = (hit.get("body") or "").strip()[:500]
         lines.append(f"{i}. {title}\n   {url}\n   {body}")
     return "\n".join(lines)
 
@@ -574,6 +577,7 @@ async def send_message(
         )
         collected: list[str] = []
         thinking_collected: list[str] = []
+        tool_names_by_id: dict[str, str] = {}
         try:
             stream = agent.stream_async(
                 body.content,
@@ -584,6 +588,15 @@ async def send_message(
                 },
             )
             async for event in stream:
+                tool_event = _agent_stream_tool_event(event)
+                if tool_event:
+                    tool_id = str(tool_event.get("id") or "")
+                    tool_name = str(tool_event.get("name") or "")
+                    if tool_id and tool_name != "unknown":
+                        tool_names_by_id[tool_id] = tool_name
+                    elif tool_id and tool_id in tool_names_by_id:
+                        tool_event["name"] = tool_names_by_id[tool_id]
+                    yield _sse("tool_call", tool_event)
                 thinking_delta = _agent_stream_thinking_delta(event)
                 if thinking_delta:
                     thinking_collected.append(thinking_delta)
@@ -690,15 +703,24 @@ def _agent_stream_thinking_delta(event: Any) -> str:
     if not isinstance(event, dict):
         return ""
 
+    if event.get("reasoning") is True:
+        reasoning_text = event.get("reasoningText")
+        if isinstance(reasoning_text, str):
+            return reasoning_text
+
     direct = _first_text_value(
         event,
         {
             "thinking",
             "thinking_delta",
+            "thinkingDelta",
             "reasoning",
             "reasoning_delta",
+            "reasoningDelta",
             "reasoning_content",
+            "reasoningContent",
             "reasoning_text",
+            "reasoningText",
         },
     )
     if direct:
@@ -709,7 +731,13 @@ def _agent_stream_thinking_delta(event: Any) -> str:
         return ""
     delta = inner.get("delta")
     if not isinstance(delta, dict):
+        content_block_delta = inner.get("contentBlockDelta")
+        if isinstance(content_block_delta, dict):
+            delta = content_block_delta.get("delta")
+    if not isinstance(delta, dict):
         return ""
+    if "reasoningContent" in delta:
+        return _first_text_value(delta["reasoningContent"], {"text", "reasoningText"}) or ""
     if str(delta.get("type") or "").lower() not in {
         "thinkingdelta",
         "reasoningdelta",
@@ -718,6 +746,86 @@ def _agent_stream_thinking_delta(event: Any) -> str:
     }:
         return ""
     return _first_text_value(delta, {"text", "thinking", "reasoning"}) or ""
+
+
+def _agent_stream_tool_event(event: Any) -> dict[str, Any] | None:
+    if not isinstance(event, dict):
+        return None
+    event_type = event.get("type")
+    if event_type == "tool_use_stream":
+        current_tool_use = event.get("current_tool_use")
+        if not isinstance(current_tool_use, dict):
+            return None
+        payload = {
+            "id": str(
+                current_tool_use.get("toolUseId")
+                or current_tool_use.get("tool_use_id")
+                or current_tool_use.get("id")
+                or ""
+            ),
+            "name": str(current_tool_use.get("name") or "unknown"),
+            "status": "running",
+        }
+        input_preview = _preview(current_tool_use.get("input"))
+        if input_preview:
+            payload["arguments_preview"] = input_preview
+        return payload
+    if event_type == "tool_result":
+        tool_result = event.get("tool_result")
+        if not isinstance(tool_result, dict):
+            return None
+        return _tool_result_event_payload(tool_result)
+    message = event.get("message")
+    if isinstance(message, dict):
+        for item in message.get("content") or []:
+            if isinstance(item, dict) and isinstance(item.get("toolResult"), dict):
+                return _tool_result_event_payload(item["toolResult"])
+    return None
+
+
+def _tool_result_event_payload(tool_result: dict[str, Any]) -> dict[str, Any]:
+    status = "error" if tool_result.get("status") == "error" else "ok"
+    payload = {
+        "id": str(
+            tool_result.get("toolUseId")
+            or tool_result.get("tool_use_id")
+            or tool_result.get("id")
+            or ""
+        ),
+        "name": str(tool_result.get("name") or "unknown"),
+        "status": status,
+    }
+    result_preview = _tool_result_preview(tool_result)
+    if result_preview:
+        payload["result_preview"] = result_preview
+    return payload
+
+
+def _tool_result_preview(tool_result: dict[str, Any]) -> str:
+    content = tool_result.get("content")
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(item, str):
+                parts.append(item)
+        if parts:
+            return "\n".join(parts)[:500]
+    return _preview(content)
+
+
+def _preview(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value[:500]
+    try:
+        return json.dumps(value, default=str, separators=(",", ":"))[:500]
+    except TypeError:
+        return str(value)[:500]
 
 
 def _first_text_value(value: Any, keys: set[str]) -> str:
@@ -802,10 +910,20 @@ def _build_agent(
         model=model_client,
         messages=strands_history,
         tools=[now, web_search],
-        system_prompt=system_prompt,
+        system_prompt=_agent_system_prompt(system_prompt),
         callback_handler=None,
         hooks=[PrismStrandsHooks(prism_client)],
     )
+
+
+def _agent_system_prompt(system_prompt: str | None) -> str:
+    tool_guidance = (
+        "Use the web_search tool when the user asks for current information, "
+        "web facts, news, prices, schedules, or anything likely to require up-to-date sources."
+    )
+    if system_prompt:
+        return f"{system_prompt.rstrip()}\n\n{tool_guidance}"
+    return tool_guidance
 
 
 def _strands_messages(history: list[Message]) -> list[dict[str, Any]]:

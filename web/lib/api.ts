@@ -15,6 +15,14 @@ export type Message = {
   thinking_trace?: string | null;
 };
 
+export type ToolCall = {
+  id: string;
+  name: string;
+  status: "running" | "ok" | "error";
+  arguments_preview?: string;
+  result_preview?: string;
+};
+
 export type SseEvent = { event: string; data: Record<string, unknown> };
 
 const apiUrl = (
