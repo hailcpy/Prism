@@ -1,15 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useParams } from "next/navigation";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type DragEvent,
-} from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { LayoutItem } from "react-grid-layout/legacy";
 
 import {
   type DashboardBody,
@@ -20,6 +15,32 @@ import {
   METRIC_LABELS,
   WIDGET_PRESETS,
 } from "../types";
+
+type GridLayoutProps = {
+  className?: string;
+  layout: LayoutItem[];
+  cols: number;
+  rowHeight: number;
+  margin?: [number, number];
+  draggableHandle?: string;
+  onLayoutChange?: (layout: LayoutItem[]) => void;
+  compactType?: "vertical" | "horizontal" | null;
+  preventCollision?: boolean;
+  children?: React.ReactNode;
+};
+
+const GridLayout = dynamic(
+  async () => {
+    const mod = await import("react-grid-layout/legacy");
+    return mod.WidthProvider(
+      mod.ReactGridLayout,
+    ) as unknown as React.ComponentType<GridLayoutProps>;
+  },
+  { ssr: false },
+);
+
+const GRID_COLS = 12;
+const ROW_HEIGHT = 80;
 
 const RANGE_OPTIONS = [
   { label: "Last 15 min", minutes: 15 },
@@ -56,8 +77,6 @@ export default function DashboardEditorPage() {
   const [rangeMinutes, setRangeMinutes] = useState(60);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
-
-  const dragCellId = useRef<string | null>(null);
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -100,55 +119,62 @@ export default function DashboardEditorPage() {
     void loadData();
   }, [dashboard, loadData]);
 
-  const handleSave = useCallback(async () => {
-    setSaving(true);
-    try {
-      const response = await fetch(`${apiUrl}/v1/dashboards/${dashboardId}`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name, layout: { cells } }),
-      });
-      if (!response.ok) throw new Error(`status ${response.status}`);
-      const body = (await response.json()) as DashboardBody;
-      setDashboard(body);
-      setDirty(false);
-      await loadData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "save failed");
-    } finally {
-      setSaving(false);
-    }
-  }, [apiUrl, cells, dashboardId, loadData, name]);
-
-  const addCell = useCallback((preset: (typeof WIDGET_PRESETS)[number]) => {
-    setCells((current) => {
-      const nextY = current.reduce((max, c) => Math.max(max, c.y + c.h), 0);
-      return [
-        ...current,
-        {
-          ...preset.cell,
-          i: randomId(),
-          x: 0,
-          y: nextY,
-        },
-      ];
-    });
-    setDirty(true);
-  }, []);
-
-  const removeCell = useCallback((cellId: string) => {
-    setCells((current) => current.filter((c) => c.i !== cellId));
-    setDirty(true);
-  }, []);
-
-  const updateCell = useCallback(
-    (cellId: string, patch: Partial<WidgetCell>) => {
-      setCells((current) =>
-        current.map((c) => (c.i === cellId ? { ...c, ...patch } : c)),
-      );
-      setDirty(true);
+  const persist = useCallback(
+    async (nextCells: WidgetCell[], nextName: string) => {
+      setSaving(true);
+      try {
+        const response = await fetch(`${apiUrl}/v1/dashboards/${dashboardId}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: nextName,
+            layout: { cells: nextCells },
+          }),
+        });
+        if (!response.ok) throw new Error(`status ${response.status}`);
+        const body = (await response.json()) as DashboardBody;
+        setDashboard(body);
+        setDirty(false);
+        await loadData();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "save failed");
+      } finally {
+        setSaving(false);
+      }
     },
-    [],
+    [apiUrl, dashboardId, loadData],
+  );
+
+  const handleSave = useCallback(
+    () => persist(cells, name),
+    [cells, name, persist],
+  );
+
+  const addCell = useCallback(
+    (preset: (typeof WIDGET_PRESETS)[number]) => {
+      const nextY = cells.reduce((max, c) => Math.max(max, c.y + c.h), 0);
+      const newCell: WidgetCell = {
+        ...preset.cell,
+        i: randomId(),
+        x: 0,
+        y: nextY,
+      };
+      const next = [...cells, newCell];
+      setCells(next);
+      setDirty(true);
+      void persist(next, name);
+    },
+    [cells, name, persist],
+  );
+
+  const removeCell = useCallback(
+    (cellId: string) => {
+      const next = cells.filter((c) => c.i !== cellId);
+      setCells(next);
+      setDirty(true);
+      void persist(next, name);
+    },
+    [cells, name, persist],
   );
 
   const updateWidget = useCallback((cellId: string, patch: Partial<Widget>) => {
@@ -160,25 +186,40 @@ export default function DashboardEditorPage() {
     setDirty(true);
   }, []);
 
-  const handleDragStart = useCallback((cellId: string) => {
-    dragCellId.current = cellId;
-  }, []);
+  const handleLayoutChange = useCallback(
+    (layout: LayoutItem[]) => {
+      let changed = false;
+      const next = cells.map((c) => {
+        const item = layout.find((l) => l.i === c.i);
+        if (!item) return c;
+        if (
+          item.x === c.x &&
+          item.y === c.y &&
+          item.w === c.w &&
+          item.h === c.h
+        ) {
+          return c;
+        }
+        changed = true;
+        return { ...c, x: item.x, y: item.y, w: item.w, h: item.h };
+      });
+      if (changed) {
+        setCells(next);
+        setDirty(true);
+      }
+    },
+    [cells],
+  );
 
-  const handleDrop = useCallback((targetCellId: string) => {
-    const sourceId = dragCellId.current;
-    dragCellId.current = null;
-    if (!sourceId || sourceId === targetCellId) return;
-    setCells((current) => {
-      const sourceIdx = current.findIndex((c) => c.i === sourceId);
-      const targetIdx = current.findIndex((c) => c.i === targetCellId);
-      if (sourceIdx === -1 || targetIdx === -1) return current;
-      const next = [...current];
-      const [moved] = next.splice(sourceIdx, 1);
-      next.splice(targetIdx, 0, moved);
-      return next;
-    });
-    setDirty(true);
-  }, []);
+  const layout: LayoutItem[] = cells.map((c) => ({
+    i: c.i,
+    x: c.x,
+    y: c.y,
+    w: c.w,
+    h: c.h,
+    minW: 2,
+    minH: 1,
+  }));
 
   return (
     <main className="min-h-[calc(100vh-56px)] bg-mesh-light dark:bg-mesh-dark flex flex-col text-zinc-900 dark:text-zinc-100">
@@ -244,8 +285,8 @@ export default function DashboardEditorPage() {
         <aside className="w-full md:w-64 p-4 md:p-6 bg-white/40 dark:bg-zinc-900/40 backdrop-blur-3xl border-r border-black/10 dark:border-white/10 flex flex-col overflow-y-auto z-10 shrink-0">
           <h2 className="text-lg font-bold mb-2">Widgets</h2>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed mb-6">
-            Click a widget to add it. Drag a cell header to reorder. Resize with
-            the buttons on each cell.
+            Click a widget to add it. Drag a cell header to move; resize from
+            the bottom-right corner.
           </p>
           <div className="flex flex-col gap-2">
             {WIDGET_PRESETS.map((preset) => (
@@ -261,26 +302,34 @@ export default function DashboardEditorPage() {
           </div>
         </aside>
         <section className="flex-1 p-4 md:p-8 overflow-y-auto custom-scrollbar">
-          {cells.length === 0 && (
+          {cells.length === 0 ? (
             <div className="text-center bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md rounded-2xl border border-dashed border-black/10 dark:border-white/10 max-w-lg mx-auto py-16 text-zinc-500 dark:text-zinc-400 font-medium">
               Add widgets from the palette to start building your dashboard.
             </div>
+          ) : (
+            <GridLayout
+              className="dash-grid-layout"
+              layout={layout}
+              cols={GRID_COLS}
+              rowHeight={ROW_HEIGHT}
+              margin={[12, 12]}
+              draggableHandle=".dash-drag-handle"
+              onLayoutChange={handleLayoutChange}
+              compactType="vertical"
+              preventCollision={false}
+            >
+              {cells.map((cell) => (
+                <div key={cell.i}>
+                  <CellView
+                    cell={cell}
+                    result={data?.widgets[cell.i]}
+                    onRemove={() => removeCell(cell.i)}
+                    onTitleChange={(title) => updateWidget(cell.i, { title })}
+                  />
+                </div>
+              ))}
+            </GridLayout>
           )}
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-6 auto-rows-[minmax(120px,auto)] place-items-stretch">
-            {cells.map((cell) => (
-              <CellView
-                key={cell.i}
-                cell={cell}
-                result={data?.widgets[cell.i]}
-                onRemove={() => removeCell(cell.i)}
-                onWidthChange={(w) => updateCell(cell.i, { w })}
-                onHeightChange={(h) => updateCell(cell.i, { h })}
-                onTitleChange={(title) => updateWidget(cell.i, { title })}
-                onDragStart={() => handleDragStart(cell.i)}
-                onDrop={() => handleDrop(cell.i)}
-              />
-            ))}
-          </div>
         </section>
       </div>
     </main>
@@ -291,88 +340,24 @@ type CellViewProps = {
   cell: WidgetCell;
   result: WidgetResult | undefined;
   onRemove: () => void;
-  onWidthChange: (w: number) => void;
-  onHeightChange: (h: number) => void;
   onTitleChange: (title: string) => void;
-  onDragStart: () => void;
-  onDrop: () => void;
 };
 
-function CellView({
-  cell,
-  result,
-  onRemove,
-  onWidthChange,
-  onHeightChange,
-  onTitleChange,
-  onDragStart,
-  onDrop,
-}: CellViewProps) {
-  const handleDragOver = (event: DragEvent<HTMLDivElement>) =>
-    event.preventDefault();
+function CellView({ cell, result, onRemove, onTitleChange }: CellViewProps) {
   return (
-    <div
-      className="bg-white/90 dark:bg-zinc-800/90 backdrop-blur-xl border border-black/10 dark:border-white/10 rounded-2xl shadow-sm flex flex-col overflow-hidden transition-all"
-      style={{ gridColumn: `span ${cell.w}`, gridRow: `span ${cell.h}` }}
-      draggable
-      onDragStart={onDragStart}
-      onDragOver={handleDragOver}
-      onDrop={onDrop}
-    >
-      <header className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-b border-black/5 dark:border-white/5 bg-black/5 dark:bg-white/5 cursor-move">
+    <div className="h-full w-full bg-white/90 dark:bg-zinc-800/90 backdrop-blur-xl border border-black/10 dark:border-white/10 rounded-2xl shadow-sm flex flex-col overflow-hidden transition-all">
+      <header className="dash-drag-handle flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-b border-black/5 dark:border-white/5 bg-black/5 dark:bg-white/5 cursor-move">
         <input
           className="flex-1 min-w-0 bg-transparent outline-none font-bold text-sm text-zinc-900 dark:text-zinc-100"
           value={cell.widget.title ?? METRIC_LABELS[cell.widget.metric_kind]}
           onChange={(e) => onTitleChange(e.target.value)}
-          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
         />
         <div className="flex items-center gap-1">
           <button
             type="button"
-            className="w-6 h-6 flex items-center justify-center rounded text-xs font-mono font-bold text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700"
-            onClick={(e) => {
-              e.stopPropagation();
-              onWidthChange(Math.max(2, cell.w - 1));
-            }}
-          >
-            -w
-          </button>
-          <button
-            type="button"
-            className="w-6 h-6 flex items-center justify-center rounded text-xs font-mono font-bold text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700"
-            onClick={(e) => {
-              e.stopPropagation();
-              onWidthChange(Math.min(12, cell.w + 1));
-            }}
-          >
-            +w
-          </button>
-          <button
-            type="button"
-            className="w-6 h-6 flex items-center justify-center rounded text-xs font-mono font-bold text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 ml-1"
-            onClick={(e) => {
-              e.stopPropagation();
-              onHeightChange(Math.max(1, cell.h - 1));
-            }}
-          >
-            -h
-          </button>
-          <button
-            type="button"
-            className="w-6 h-6 flex items-center justify-center rounded text-xs font-mono font-bold text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700"
-            onClick={(e) => {
-              e.stopPropagation();
-              onHeightChange(Math.min(4, cell.h + 1));
-            }}
-          >
-            +h
-          </button>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onRemove();
-            }}
+            onClick={onRemove}
+            onMouseDown={(e) => e.stopPropagation()}
             className="w-6 h-6 flex items-center justify-center rounded text-[16px] leading-none text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 ml-2"
             title="Remove Widget"
           >
