@@ -15,6 +15,7 @@ import {
   MessageSquarePlus,
   Sparkles,
   Square,
+  Trash2,
 } from "lucide-react";
 
 import {
@@ -24,6 +25,7 @@ import {
   ModelOption,
   apiUrl,
   createConversation,
+  deleteConversation,
   getConversationCost,
   getConversations,
   getMessages,
@@ -54,6 +56,8 @@ export default function Home() {
   const [thinkingEffort, setThinkingEffort] = useState<
     "low" | "medium" | "high" | "xhigh" | "max"
   >("medium");
+  const [pendingDelete, setPendingDelete] = useState<Conversation | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
 
@@ -133,16 +137,44 @@ export default function Home() {
 
   useEffect(() => {
     function onEsc(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") abortRef.current?.abort();
+      if (event.key !== "Escape") return;
+      if (pendingDelete) {
+        if (!deleteBusy) setPendingDelete(null);
+        return;
+      }
+      abortRef.current?.abort();
     }
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, []);
+  }, [pendingDelete, deleteBusy]);
 
   async function startNewChat() {
     setConversationId(null);
     setMessages([]);
     setStatus("");
+  }
+
+  async function confirmDeleteConversation() {
+    if (!pendingDelete) return;
+    const id = pendingDelete.id;
+    setDeleteBusy(true);
+    try {
+      await deleteConversation(id);
+    } catch (e) {
+      setStatus(
+        e instanceof Error ? e.message : "failed to delete conversation",
+      );
+      setDeleteBusy(false);
+      return;
+    }
+    setConversations((current) => current.filter((c) => c.id !== id));
+    if (conversationId === id) {
+      setConversationId(null);
+      setMessages([]);
+      setCost(null);
+    }
+    setDeleteBusy(false);
+    setPendingDelete(null);
   }
 
   async function send(event: FormEvent) {
@@ -306,27 +338,44 @@ export default function Home() {
 
         <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
           {conversations.map((c) => (
-            <motion.button
+            <motion.div
               key={c.id}
               whileHover={{ x: 2 }}
-              className={`w-full text-left p-3 rounded-lg border transition-all ${
+              className={`group relative w-full rounded-lg border transition-all ${
                 c.id === conversationId
                   ? "border-[#009f8f]/30 bg-gradient-to-br from-[#009f8f]/10 to-transparent dark:border-[#009f8f]/50 dark:from-[#009f8f]/20 shadow-sm"
                   : "border-black/5 dark:border-white/5 bg-white/50 dark:bg-zinc-800/30 hover:bg-white/80 dark:hover:bg-zinc-800/60"
               }`}
-              onClick={() => {
-                setConversationId(c.id);
-                setModel(c.model_default);
-              }}
             >
-              <span className="block font-semibold text-sm truncate text-zinc-900 dark:text-zinc-100">
-                {c.title ?? c.model_default}
-              </span>
-              <span className="block text-xs text-zinc-500 dark:text-zinc-400 mt-1 truncate">
-                {c.title ? `${c.model_default} · ` : ""}
-                {c.message_count} messages
-              </span>
-            </motion.button>
+              <button
+                type="button"
+                className="w-full text-left p-3 pr-10"
+                onClick={() => {
+                  setConversationId(c.id);
+                  setModel(c.model_default);
+                }}
+              >
+                <span className="block font-semibold text-sm truncate text-zinc-900 dark:text-zinc-100">
+                  {c.title ?? c.model_default}
+                </span>
+                <span className="block text-xs text-zinc-500 dark:text-zinc-400 mt-1 truncate">
+                  {c.title ? `${c.model_default} · ` : ""}
+                  {c.message_count} messages
+                </span>
+              </button>
+              <button
+                type="button"
+                aria-label="Delete conversation"
+                title="Delete conversation"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPendingDelete(c);
+                }}
+                className="absolute top-1/2 -translate-y-1/2 right-2 p-1.5 rounded-md text-zinc-400 hover:text-red-500 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </motion.div>
           ))}
         </div>
       </aside>
@@ -568,6 +617,67 @@ export default function Home() {
           </div>
         </div>
       </section>
+      <AnimatePresence>
+        {pendingDelete && (
+          <motion.div
+            key="delete-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+            onClick={() => !deleteBusy && setPendingDelete(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-conversation-title"
+          >
+            <motion.div
+              key="delete-card"
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.15 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-sm rounded-2xl bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 shadow-2xl p-6"
+            >
+              <div className="flex items-start gap-3">
+                <div className="shrink-0 w-10 h-10 rounded-full bg-red-500/10 text-red-500 flex items-center justify-center">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2
+                    id="delete-conversation-title"
+                    className="text-base font-semibold text-zinc-900 dark:text-zinc-100"
+                  >
+                    Delete conversation?
+                  </h2>
+                  <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                    “{pendingDelete.title ?? pendingDelete.model_default}” and
+                    all its messages will be permanently removed.
+                  </p>
+                </div>
+              </div>
+              <div className="mt-6 flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={() => setPendingDelete(null)}
+                  className="px-4 py-2 rounded-lg text-sm font-semibold text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={() => void confirmDeleteConversation()}
+                  className="px-4 py-2 rounded-lg text-sm font-semibold bg-red-600 text-white hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
+                >
+                  {deleteBusy ? "Deleting…" : "Delete"}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

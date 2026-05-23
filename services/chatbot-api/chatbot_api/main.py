@@ -66,6 +66,8 @@ class ChatStore(Protocol):
 
     def update_conversation_title(self, conversation_id: str, title: str) -> None: ...
 
+    def delete_conversation(self, conversation_id: str) -> None: ...
+
     def list_messages(self, conversation_id: str) -> list[Message]: ...
 
     def create_message(
@@ -253,6 +255,11 @@ class PostgresChatStore:
                 (title, conversation_id),
             )
 
+    def delete_conversation(self, conversation_id: str) -> None:
+        self._ensure_schema()
+        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM conversations WHERE id = %s", (conversation_id,))
+
 
 class CreateConversationRequest(BaseModel):
     model_default: str = "gpt-4o"
@@ -347,9 +354,32 @@ def now() -> str:
 
 
 @tool
-def web_search(query: str) -> str:
-    """Search the web for a query using a deterministic demo stub."""
-    return f"Demo search result for {query!r}: no live web request was made."
+def web_search(query: str, max_results: int = 5) -> str:
+    """Search the web with DuckDuckGo and return the top results.
+
+    Each result includes a title, source URL, and a short snippet.
+    """
+    from ddgs import DDGS
+
+    query = (query or "").strip()
+    if not query:
+        return "web_search: empty query"
+    limit = max(1, min(int(max_results or 5), 10))
+    try:
+        with DDGS() as ddgs:
+            hits = list(ddgs.text(query, max_results=limit))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("web_search failed: %s", exc)
+        return f"web_search failed: {exc}"
+    if not hits:
+        return f"No results for {query!r}."
+    lines = [f"Top {len(hits)} web results for {query!r}:"]
+    for i, hit in enumerate(hits, 1):
+        title = (hit.get("title") or "").strip()
+        url = (hit.get("href") or hit.get("url") or "").strip()
+        body = (hit.get("body") or "").strip()
+        lines.append(f"{i}. {title}\n   {url}\n   {body}")
+    return "\n".join(lines)
 
 
 @contextlib.asynccontextmanager
@@ -453,6 +483,15 @@ def update_conversation(
         message_count=updated.message_count,
         title=updated.title,
     )
+
+
+@app.delete("/v1/conversations/{conversation_id}", status_code=204)
+def delete_conversation(request: Request, conversation_id: str) -> Response:
+    store = _get_store(request.app)
+    if store.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    store.delete_conversation(conversation_id)
+    return Response(status_code=204)
 
 
 @app.get("/v1/conversations/{conversation_id}/messages", response_model=ListMessagesResponse)

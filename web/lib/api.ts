@@ -105,6 +105,15 @@ export async function patchConversation(
   return (await safeJson(response)) as Conversation;
 }
 
+export async function deleteConversation(conversationId: string): Promise<void> {
+  const response = await fetch(`${apiUrl}/v1/conversations/${conversationId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok && response.status !== 404) {
+    throw new Error(await readError(response, "failed to delete conversation"));
+  }
+}
+
 export async function createConversation(
   modelDefault: string,
 ): Promise<string> {

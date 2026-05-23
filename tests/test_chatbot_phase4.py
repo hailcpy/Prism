@@ -93,6 +93,10 @@ class FakeChatStore:
         if conv is not None:
             self.conversations[conversation_id] = replace(conv, title=title)
 
+    def delete_conversation(self, conversation_id: str) -> None:
+        self.conversations.pop(conversation_id, None)
+        self.messages = [m for m in self.messages if m.conversation_id != conversation_id]
+
 
 class FakePrismClient:
     def install(self) -> None:
