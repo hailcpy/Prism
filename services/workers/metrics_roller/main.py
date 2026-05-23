@@ -34,6 +34,7 @@ class _WindowBucket:
     model: str
     provider: str
     latencies: list[int] = field(default_factory=list)
+    ttfts: list[int] = field(default_factory=list)
     errors: int = 0
     prompt_tokens_sum: int = 0
     completion_tokens_sum: int = 0
@@ -41,6 +42,8 @@ class _WindowBucket:
 
     def add(self, event: InferenceEvent) -> None:
         bisect.insort(self.latencies, event.latency_ms)
+        if event.ttft_ms is not None:
+            bisect.insort(self.ttfts, event.ttft_ms)
         if event.status != "ok":
             self.errors += 1
         if event.usage.prompt_tokens:
@@ -59,6 +62,8 @@ class _WindowBucket:
             error_count=self.errors,
             latency_p50_ms=_percentile(self.latencies, 0.50),
             latency_p95_ms=_percentile(self.latencies, 0.95),
+            ttft_p50_ms=_percentile(self.ttfts, 0.50) if self.ttfts else None,
+            ttft_p95_ms=_percentile(self.ttfts, 0.95) if self.ttfts else None,
             prompt_tokens_sum=self.prompt_tokens_sum,
             completion_tokens_sum=self.completion_tokens_sum,
             cost_usd_sum=self.cost_usd_sum,

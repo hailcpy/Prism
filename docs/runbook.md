@@ -36,6 +36,7 @@ make up
 | `REDIS_URL` | yes | `redis://redis:6379/0` | Wired by Compose |
 | `INGESTION_URL` | yes | `http://ingestion:8001` | What the SDK posts to |
 | `PRISM_KEEP_RAW` | no | `false` | If `true`, ingestion redacts and persists the full `raw_payload` (debug only — logs a warning at startup). When `false`, `raw_payload` is dropped at ingestion; only redacted previews persist. See ADR-0006. |
+| `PRISM_REDACTOR` | no | `regex` | Which `Redactor` implementation ingestion loads. `regex` is built-in; `presidio` uses Microsoft Presidio and requires the `presidio` extra (`uv pip install 'ingestion-api[presidio]'`). Unknown values fall back to `regex` with a warning. |
 | `PRISM_LOG_LEVEL` | no | `INFO` | Standard Python log level |
 | `PARTITION_RETENTION_DAYS` | no | `30` | partition-cron drops older partitions |
 

@@ -48,6 +48,24 @@ export type Conversation = {
   id: string;
   model_default: string;
   message_count: number;
+  title?: string | null;
+};
+
+export type ConversationCost = {
+  conversation_id: string;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_prompt_tokens: number;
+  reasoning_tokens: number;
+  cost_usd: number;
+};
+
+export type ThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+export type ThinkingConfig = {
+  enabled: boolean;
+  effort?: ThinkingEffort;
 };
 
 export async function getConversations(): Promise<Conversation[]> {
@@ -57,6 +75,45 @@ export async function getConversations(): Promise<Conversation[]> {
   }
   const body = (await safeJson(response)) as { conversations?: Conversation[] };
   return body.conversations ?? [];
+}
+
+export async function getConversationCost(
+  conversationId: string,
+): Promise<ConversationCost | null> {
+  const response = await fetch(
+    `${apiUrl}/v1/conversations/${conversationId}/cost`,
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(await readError(response, "failed to load cost"));
+  }
+  return (await safeJson(response)) as ConversationCost;
+}
+
+export async function patchConversation(
+  conversationId: string,
+  patch: { title?: string },
+): Promise<Conversation> {
+  const response = await fetch(`${apiUrl}/v1/conversations/${conversationId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response, "failed to update conversation"));
+  }
+  return (await safeJson(response)) as Conversation;
+}
+
+export async function deleteConversation(
+  conversationId: string,
+): Promise<void> {
+  const response = await fetch(`${apiUrl}/v1/conversations/${conversationId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok && response.status !== 404) {
+    throw new Error(await readError(response, "failed to delete conversation"));
+  }
 }
 
 export async function createConversation(

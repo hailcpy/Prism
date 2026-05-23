@@ -41,6 +41,7 @@ class Conversation:
     created_at: datetime
     updated_at: datetime
     message_count: int = 0
+    title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,10 @@ class ChatStore(Protocol):
     def list_conversations(self, limit: int = 50) -> list[Conversation]: ...
 
     def get_conversation(self, conversation_id: str) -> Conversation | None: ...
+
+    def update_conversation_title(self, conversation_id: str, title: str) -> None: ...
+
+    def delete_conversation(self, conversation_id: str) -> None: ...
 
     def list_messages(self, conversation_id: str) -> list[Message]: ...
 
@@ -98,6 +103,7 @@ class PostgresChatStore:
                 "ALTER TABLE messages ADD COLUMN IF NOT EXISTS metadata_jsonb JSONB "
                 "NOT NULL DEFAULT '{}'::jsonb"
             )
+            cur.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS title TEXT")
         self._ensured_schema = True
 
     def create_conversation(self, model_default: str, system_prompt: str | None) -> Conversation:
@@ -108,7 +114,7 @@ class PostgresChatStore:
                 """
                 INSERT INTO conversations (id, model_default, system_prompt)
                 VALUES (%s, %s, %s)
-                RETURNING id::text, model_default, system_prompt, created_at, updated_at
+                RETURNING id::text, model_default, system_prompt, created_at, updated_at, title
                 """,
                 (conversation_id, model_default, system_prompt),
             )
@@ -123,7 +129,7 @@ class PostgresChatStore:
             cur.execute(
                 """
                 SELECT c.id::text, c.model_default, c.system_prompt, c.created_at, c.updated_at,
-                       count(m.id)::int AS message_count
+                       c.title, count(m.id)::int AS message_count
                 FROM conversations c
                 LEFT JOIN messages m ON m.conversation_id = c.id
                 GROUP BY c.id
@@ -140,7 +146,7 @@ class PostgresChatStore:
             cur.execute(
                 """
                 SELECT id::text, model_default, system_prompt, created_at, updated_at,
-                       0 AS message_count
+                       title, 0 AS message_count
                 FROM conversations
                 WHERE id = %s
                 """,
@@ -241,6 +247,19 @@ class PostgresChatStore:
         with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM messages WHERE id = %s", (message_id,))
 
+    def update_conversation_title(self, conversation_id: str, title: str) -> None:
+        self._ensure_schema()
+        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE conversations SET title = %s, updated_at = now() WHERE id = %s",
+                (title, conversation_id),
+            )
+
+    def delete_conversation(self, conversation_id: str) -> None:
+        self._ensure_schema()
+        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM conversations WHERE id = %s", (conversation_id,))
+
 
 class CreateConversationRequest(BaseModel):
     model_default: str = "gpt-4o"
@@ -257,6 +276,11 @@ class ConversationBody(BaseModel):
     model_default: str
     updated_at: datetime
     message_count: int
+    title: str | None = None
+
+
+class UpdateConversationRequest(BaseModel):
+    title: str | None = None
 
 
 class ListConversationsResponse(BaseModel):
@@ -277,10 +301,37 @@ class ListMessagesResponse(BaseModel):
     messages: list[MessageBody]
 
 
+ThinkingEffort = Literal["low", "medium", "high", "xhigh", "max"]
+
+THINKING_EFFORT_PCT: dict[str, float] = {
+    "low": 0.10,
+    "medium": 0.25,
+    "high": 0.50,
+    "xhigh": 0.75,
+    "max": 0.95,
+}
+THINKING_MAX_BUDGET_TOKENS = 32000
+THINKING_MIN_BUDGET_TOKENS = 1024
+OPENAI_REASONING_EFFORT: dict[str, str] = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+    "max": "high",
+}
+
+
+class ThinkingConfig(BaseModel):
+    enabled: bool = False
+    effort: ThinkingEffort | None = None
+    budget_tokens: int | None = None
+
+
 class SendMessageRequest(BaseModel):
     role: Literal["user"] = "user"
     content: str = Field(min_length=1)
     model: str | None = None
+    thinking: ThinkingConfig | None = None
 
 
 class ModelOption(BaseModel):
@@ -303,20 +354,51 @@ def now() -> str:
 
 
 @tool
-def web_search(query: str) -> str:
-    """Search the web for a query using a deterministic demo stub."""
-    return f"Demo search result for {query!r}: no live web request was made."
+def web_search(query: str, max_results: int = 5) -> str:
+    """Search the web with DuckDuckGo and return the top results.
+
+    Each result includes a title, source URL, and a short snippet.
+    """
+    from ddgs import DDGS
+
+    query = (query or "").strip()
+    if not query:
+        return "web_search: empty query"
+    limit = max(1, min(int(max_results or 5), 10))
+    try:
+        with DDGS() as ddgs:
+            hits = list(ddgs.text(query, max_results=limit))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("web_search failed: %s", exc)
+        return f"web_search failed: {exc}"
+    if not hits:
+        return f"No results for {query!r}."
+    lines = [f"Top {len(hits)} web results for {query!r}:"]
+    for i, hit in enumerate(hits, 1):
+        title = (hit.get("title") or "").strip()
+        url = (hit.get("href") or hit.get("url") or "").strip()
+        body = (hit.get("body") or "").strip()
+        lines.append(f"{i}. {title}\n   {url}\n   {body}")
+    return "\n".join(lines)
 
 
 @contextlib.asynccontextmanager
-async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(app_: FastAPI) -> AsyncIterator[None]:
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         try:
             await asyncio.to_thread(run_migrations, database_url)
         except Exception:
             logging.getLogger(__name__).exception("startup migrations failed")
-    yield
+    try:
+        yield
+    finally:
+        client = getattr(app_.state, "prism_client", None)
+        if client is not None:
+            try:
+                await asyncio.to_thread(client.close)
+            except Exception:
+                logging.getLogger(__name__).exception("prism client shutdown failed")
 
 
 app = FastAPI(title="prism-chatbot-api", version="0.1.0", lifespan=_lifespan)
@@ -384,10 +466,40 @@ def list_conversations(request: Request) -> ListConversationsResponse:
                 model_default=conversation.model_default,
                 updated_at=conversation.updated_at,
                 message_count=conversation.message_count,
+                title=conversation.title,
             )
             for conversation in conversations
         ]
     )
+
+
+@app.patch("/v1/conversations/{conversation_id}", response_model=ConversationBody)
+def update_conversation(
+    request: Request, conversation_id: str, body: UpdateConversationRequest
+) -> ConversationBody:
+    store = _get_store(request.app)
+    conversation = store.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    if body.title is not None:
+        store.update_conversation_title(conversation_id, body.title)
+    updated = store.get_conversation(conversation_id) or conversation
+    return ConversationBody(
+        id=updated.id,
+        model_default=updated.model_default,
+        updated_at=updated.updated_at,
+        message_count=updated.message_count,
+        title=updated.title,
+    )
+
+
+@app.delete("/v1/conversations/{conversation_id}", status_code=204)
+def delete_conversation(request: Request, conversation_id: str) -> Response:
+    store = _get_store(request.app)
+    if store.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    store.delete_conversation(conversation_id)
+    return Response(status_code=204)
 
 
 @app.get("/v1/conversations/{conversation_id}/messages", response_model=ListMessagesResponse)
@@ -412,6 +524,7 @@ async def send_message(
         raise HTTPException(status_code=404, detail="conversation not found")
 
     previous_messages = store.list_messages(conversation_id)
+    is_first_turn = not any(m.role == "user" for m in previous_messages)
     model, provider = llm.provider_for_model(body.model or conversation.model_default)
     credential = _get_credential_store(request.app).get_default_credential_for_provider(provider)
     if credential is None:
@@ -438,6 +551,7 @@ async def send_message(
         prism_metadata=prism_metadata,
         prism_client=prism_client,
         credential=credential,
+        thinking=body.thinking,
     )
 
     async def event_stream() -> AsyncIterator[bytes]:
@@ -527,6 +641,16 @@ async def send_message(
         thinking_trace = "".join(thinking_collected).strip() or None
         metadata = {"thinking_trace": thinking_trace} if thinking_trace else {}
         store.update_message_content(assistant_message.id, content, status="ok", metadata=metadata)
+        if is_first_turn and conversation.title is None:
+            generated_title = await _generate_title(
+                user_content=body.content,
+                assistant_content=content,
+                fallback_model=model,
+                credential=credential,
+            )
+            if generated_title:
+                store.update_conversation_title(conversation_id, generated_title)
+                yield _sse("title", {"title": generated_title})
         yield _sse(
             "done",
             {
@@ -622,6 +746,35 @@ def _llm_messages(*, system_prompt: str | None, history: list[Message]) -> list[
     return messages
 
 
+def _thinking_provider(model: str) -> str:
+    bare = model.removeprefix("bedrock/").removeprefix("gemini/").lower()
+    if bare.startswith(("gpt-", "o1", "o3", "o4")) or bare.startswith("openai/"):
+        return "openai"
+    if "claude" in bare:
+        return "anthropic"
+    if "gemini" in bare:
+        return "gemini"
+    return "anthropic"
+
+
+def _thinking_budget_tokens(effort: ThinkingEffort | None, fallback: int | None) -> int:
+    if effort is not None:
+        budget = int(THINKING_MAX_BUDGET_TOKENS * THINKING_EFFORT_PCT[effort])
+        return max(THINKING_MIN_BUDGET_TOKENS, budget)
+    if fallback and fallback > 0:
+        return fallback
+    return int(THINKING_MAX_BUDGET_TOKENS * THINKING_EFFORT_PCT["medium"])
+
+
+def _thinking_params(model: str, thinking: ThinkingConfig) -> dict[str, Any]:
+    provider = _thinking_provider(model)
+    if provider == "openai":
+        effort = thinking.effort or "medium"
+        return {"reasoning_effort": OPENAI_REASONING_EFFORT[effort]}
+    budget = _thinking_budget_tokens(thinking.effort, thinking.budget_tokens)
+    return {"thinking": {"type": "enabled", "budget_tokens": budget}}
+
+
 def _build_agent(
     *,
     model: str,
@@ -630,15 +783,19 @@ def _build_agent(
     prism_metadata: dict[str, Any],
     prism_client: PrismClient,
     credential: Any,
+    thinking: ThinkingConfig | None = None,
 ) -> Agent:
     client_args: dict[str, Any] = {
         "metadata": prism_metadata,
     }
     client_args.update(llm.litellm_client_args(credential))
+    params: dict[str, Any] = {"stream": True}
+    if thinking and thinking.enabled:
+        params.update(_thinking_params(model, thinking))
     model_client = LiteLLMModel(
         client_args=client_args,
         model_id=model,
-        params={"stream": True},
+        params=params,
     )
     strands_history = cast(Any, _strands_messages(history))
     return Agent(
@@ -657,6 +814,42 @@ def _strands_messages(history: list[Message]) -> list[dict[str, Any]]:
         for message in history[-12:]
         if message.role in {"user", "assistant"} and message.content
     ]
+
+
+async def _generate_title(
+    *,
+    user_content: str,
+    assistant_content: str,
+    fallback_model: str,
+    credential: Any,
+) -> str | None:
+    import litellm
+
+    model = os.getenv("TITLE_GENERATION_MODEL") or fallback_model
+    user_snippet = user_content.strip()[:500]
+    assistant_snippet = assistant_content.strip()[:500]
+    prompt = (
+        "Summarize the topic of this exchange in 4-6 words. "
+        "Return only the title — no quotes, no punctuation, no prefix.\n\n"
+        f"User: {user_snippet}\n\nAssistant: {assistant_snippet}"
+    )
+    try:
+        response = await litellm.acompletion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=24,
+            temperature=0.3,
+            **llm.litellm_client_args(credential),
+        )
+        choice = response.choices[0]  # type: ignore[index]
+        text = (choice.message.content or "").strip()
+        text = text.strip("\"'`")
+        if not text:
+            return None
+        return text[:120]
+    except Exception:
+        logging.getLogger(__name__).exception("title generation failed")
+        return None
 
 
 def _fallback_models() -> list[ModelOption]:
@@ -704,6 +897,8 @@ class MetricsBucket(BaseModel):
     error_count: int
     latency_p50_ms: int
     latency_p95_ms: int
+    ttft_p50_ms: int | None = None
+    ttft_p95_ms: int | None = None
     prompt_tokens_sum: int
     completion_tokens_sum: int
     cost_usd_sum: float = 0.0
@@ -711,6 +906,11 @@ class MetricsBucket(BaseModel):
 
 class MetricsResponse(BaseModel):
     buckets: list[MetricsBucket]
+
+
+class MetricsDimensionsResponse(BaseModel):
+    models: list[str]
+    providers: list[str]
 
 
 class ConversationCostResponse(BaseModel):
@@ -758,6 +958,8 @@ def get_metrics(
                 error_count=row.error_count,
                 latency_p50_ms=row.latency_p50_ms,
                 latency_p95_ms=row.latency_p95_ms,
+                ttft_p50_ms=row.ttft_p50_ms,
+                ttft_p95_ms=row.ttft_p95_ms,
                 prompt_tokens_sum=row.prompt_tokens_sum,
                 completion_tokens_sum=row.completion_tokens_sum,
                 cost_usd_sum=row.cost_usd_sum,
@@ -765,6 +967,12 @@ def get_metrics(
             for row in rows
         ]
     )
+
+
+@app.get("/v1/metrics/dimensions", response_model=MetricsDimensionsResponse)
+def get_metric_dimensions(request: Request) -> MetricsDimensionsResponse:
+    models, providers = _get_log_store(request.app).get_metric_dimensions()
+    return MetricsDimensionsResponse(models=models, providers=providers)
 
 
 @app.get(
@@ -827,6 +1035,7 @@ def _conversation_from_row(row: dict[str, Any]) -> Conversation:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         message_count=row.get("message_count", 0),
+        title=row.get("title"),
     )
 
 

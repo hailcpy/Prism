@@ -86,6 +86,8 @@ class MetricsRow:
     prompt_tokens_sum: int
     completion_tokens_sum: int
     cost_usd_sum: float = 0.0
+    ttft_p50_ms: int | None = None
+    ttft_p95_ms: int | None = None
 
 
 @dataclass(frozen=True)

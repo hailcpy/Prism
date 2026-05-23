@@ -1,10 +1,41 @@
-.PHONY: up down init logs psql redis-cli seed install-dev lint format format-check typecheck test check demo web-rebuild web-restart web-logs web-dev web-install
+.PHONY: bootstrap up down nuke restart init logs psql redis-cli seed install-dev lint format format-check typecheck test check demo web-rebuild web-restart web-logs web-dev web-dev-stop web-install
 
-up:
+# `bootstrap` creates .env from .env.example on first run and fills generated
+# secrets (REDIS_PASSWORD, PRISM_CREDS_KEY). Idempotent — does nothing if .env
+# already exists. Wired into `up` so a fresh clone is one command.
+bootstrap:
+	@python3 scripts/bootstrap_env.py
+
+# `up` builds images and starts containers in the background.
+# Use this after a Dockerfile/lockfile change, or when adding/removing services.
+up: bootstrap
 	docker compose up -d --build
 
+# `down` stops and removes containers but KEEPS named volumes
+# (postgres-data, redis-data). Your data survives.
 down:
-	docker compose down
+	docker compose down --remove-orphans
+	@$(MAKE) --no-print-directory web-dev-stop
+
+web-dev-stop:
+	@pid=$$(lsof -ti tcp:3000); \
+	if [ -n "$$pid" ]; then \
+	  echo "Killing local next dev on :3000 (pid $$pid)"; \
+	  kill $$pid 2>/dev/null || true; \
+	fi
+
+# `nuke` ALSO deletes named volumes — postgres + redis data is gone.
+# Requires explicit confirmation. Use this only when you want a clean slate.
+nuke:
+	@echo "This will DELETE all postgres and redis data (named volumes)."
+	@printf "Type 'nuke' to confirm: "; read ans; [ "$$ans" = "nuke" ] || (echo "Aborted."; exit 1)
+	docker compose down -v
+
+# `restart` reloads running services. With the source bind-mounts in
+# docker-compose.yml, this picks up Python code changes WITHOUT a rebuild.
+# Pass SERVICE=name to restart just one service.
+restart:
+	docker compose restart $(if $(SERVICE),$(SERVICE),)
 
 init:
 	docker compose restart
@@ -13,10 +44,10 @@ logs:
 	docker compose logs -f $(if $(SERVICE),$(SERVICE),)
 
 psql:
-	docker compose exec postgres psql -U prism prism
+	docker compose exec postgres psql -U $${POSTGRES_USER:-prism} $${POSTGRES_DB:-prism}
 
 redis-cli:
-	docker compose exec redis redis-cli
+	docker compose exec redis sh -c 'redis-cli -a "$$REDIS_PASSWORD"'
 
 seed:
 	@echo "seed: not implemented until Phase 4"

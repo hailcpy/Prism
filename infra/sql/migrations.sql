@@ -7,6 +7,9 @@
 ALTER TABLE messages
   ADD COLUMN IF NOT EXISTS metadata_jsonb JSONB NOT NULL DEFAULT '{}'::jsonb;
 
+ALTER TABLE conversations
+  ADD COLUMN IF NOT EXISTS title TEXT;
+
 DO $$
 BEGIN
   CREATE TYPE message_status AS ENUM ('pending', 'ok', 'error', 'cancelled');
@@ -23,7 +26,9 @@ ALTER TABLE inference_logs
   ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION;
 
 ALTER TABLE metrics_minute
-  ADD COLUMN IF NOT EXISTS cost_usd_sum DOUBLE PRECISION NOT NULL DEFAULT 0;
+  ADD COLUMN IF NOT EXISTS cost_usd_sum DOUBLE PRECISION NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS ttft_p50_ms INT,
+  ADD COLUMN IF NOT EXISTS ttft_p95_ms INT;
 
 CREATE TABLE IF NOT EXISTS dashboards (
   id UUID PRIMARY KEY,

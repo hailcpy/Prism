@@ -10,6 +10,7 @@ CREATE TABLE conversations (
   user_id UUID NULL,
   model_default TEXT NOT NULL,
   system_prompt TEXT,
+  title TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -125,6 +126,8 @@ CREATE TABLE metrics_minute (
   error_count INT NOT NULL,
   latency_p50_ms INT NOT NULL,
   latency_p95_ms INT NOT NULL,
+  ttft_p50_ms INT,
+  ttft_p95_ms INT,
   prompt_tokens_sum BIGINT NOT NULL,
   completion_tokens_sum BIGINT NOT NULL,
   cost_usd_sum DOUBLE PRECISION NOT NULL DEFAULT 0,

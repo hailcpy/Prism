@@ -13,7 +13,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from redis.exceptions import RedisError
 
-from ingestion_api.redaction import RegexRedactor
+from ingestion_api.redaction import Redactor, build_redactor
 from prism_infra.bus import Bus, RedisStreamsBus
 from prism_infra.events import event_to_wire, tool_event_to_wire
 from prism_infra.models import ErrorInfo, InferenceEvent, ToolErrorInfo, ToolInvocationEvent, Usage
@@ -117,7 +117,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="prism-ingestion-api", version="0.1.0", lifespan=lifespan)
 app.state.bus = None
 app.state.raw_payload_store = None
-app.state.redactor = RegexRedactor()
+app.state.redactor = build_redactor()
 
 
 @app.get("/healthz")
@@ -130,7 +130,7 @@ def ingest_batch(request: Request, body: Any = BATCH_BODY) -> BatchResponse:
     events = _extract_events(body)
     bus = _get_bus(request.app)
     raw_payload_store = _get_raw_payload_store(request.app)
-    redactor: RegexRedactor = request.app.state.redactor
+    redactor: Redactor = request.app.state.redactor
 
     accepted = 0
     rejected: list[RejectedEvent] = []
@@ -169,7 +169,7 @@ def _enforce_event_size(raw_event: Any) -> None:
 
 def _sanitize_any_event(
     raw_event: Any,
-    redactor: RegexRedactor,
+    redactor: Redactor,
     raw_payload_store: RawPayloadStore,
 ) -> dict[str, Any]:
     if isinstance(raw_event, dict) and raw_event.get("event_type") == "tool_invocation":
@@ -183,7 +183,7 @@ def _sanitize_any_event(
 
 def _sanitize_event(
     body: EventBody,
-    redactor: RegexRedactor,
+    redactor: Redactor,
     raw_payload_store: RawPayloadStore,
 ) -> InferenceEvent:
     raw_payload_uri = None
@@ -202,7 +202,7 @@ def _sanitize_event(
         model=body.model,
         provider=body.provider,
         status=body.status,
-        error=_error_from_body(body.error),
+        error=_error_from_body(body.error, redactor),
         ts_start=body.ts_start,
         ts_end=body.ts_end,
         latency_ms=body.latency_ms,
@@ -219,13 +219,13 @@ def _sanitize_event(
         response_preview=redactor.redact_text(body.response_preview),
         raw_payload_uri=raw_payload_uri,
         raw_payload_jsonb=raw_payload_jsonb,
-        metadata=body.metadata,
+        metadata=redactor.redact_json(body.metadata),
         sdk_version=body.sdk_version,
         created_at=datetime.now(UTC),
     )
 
 
-def _sanitize_tool_event(body: ToolEventBody, redactor: RegexRedactor) -> ToolInvocationEvent:
+def _sanitize_tool_event(body: ToolEventBody, redactor: Redactor) -> ToolInvocationEvent:
     return ToolInvocationEvent(
         schema_version=body.schema_version,
         tool_invocation_id=str(body.tool_invocation_id),
@@ -235,26 +235,30 @@ def _sanitize_tool_event(body: ToolEventBody, redactor: RegexRedactor) -> ToolIn
         arguments_preview=redactor.redact_text(body.arguments_preview) or "",
         result_preview=redactor.redact_text(body.result_preview),
         status=body.status,
-        error=_tool_error_from_body(body.error),
+        error=_tool_error_from_body(body.error, redactor),
         ts_start=body.ts_start,
         ts_end=body.ts_end,
         latency_ms=body.latency_ms,
-        metadata=body.metadata,
+        metadata=redactor.redact_json(body.metadata),
         sdk_version=body.sdk_version,
         created_at=datetime.now(UTC),
     )
 
 
-def _error_from_body(error: ErrorBody | None) -> ErrorInfo | None:
+def _error_from_body(error: ErrorBody | None, redactor: Redactor) -> ErrorInfo | None:
     if error is None:
         return None
-    return ErrorInfo(type=error.type, message=error.message, provider_code=error.provider_code)
+    return ErrorInfo(
+        type=error.type,
+        message=redactor.redact_text(error.message) or "",
+        provider_code=error.provider_code,
+    )
 
 
-def _tool_error_from_body(error: ToolErrorBody | None) -> ToolErrorInfo | None:
+def _tool_error_from_body(error: ToolErrorBody | None, redactor: Redactor) -> ToolErrorInfo | None:
     if error is None:
         return None
-    return ToolErrorInfo(type=error.type, message=error.message)
+    return ToolErrorInfo(type=error.type, message=redactor.redact_text(error.message) or "")
 
 
 def _validation_reason(exc: ValidationError) -> str:

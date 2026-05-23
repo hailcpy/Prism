@@ -9,14 +9,24 @@ import {
   useState,
 } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, RefreshCw, MessageSquarePlus, Sparkles, Square } from "lucide-react";
+import {
+  Send,
+  RefreshCw,
+  MessageSquarePlus,
+  Sparkles,
+  Square,
+  Trash2,
+} from "lucide-react";
 
 import {
   Conversation,
+  ConversationCost,
   Message,
   ModelOption,
   apiUrl,
   createConversation,
+  deleteConversation,
+  getConversationCost,
   getConversations,
   getMessages,
   getModels,
@@ -41,8 +51,20 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [modelStatus, setModelStatus] = useState("");
+  const [cost, setCost] = useState<ConversationCost | null>(null);
+  const [thinkingEnabled, setThinkingEnabled] = useState(false);
+  const [thinkingEffort, setThinkingEffort] = useState<
+    "low" | "medium" | "high" | "xhigh" | "max"
+  >("medium");
+  const [pendingDelete, setPendingDelete] = useState<Conversation | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const activeConversationIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    activeConversationIdRef.current = conversationId;
+  }, [conversationId]);
 
   const loadConversations = useCallback(async () => {
     try {
@@ -90,9 +112,19 @@ export default function Home() {
     };
   }, [loadModels]);
 
+  const refreshCost = useCallback(async (id: string) => {
+    try {
+      const c = await getConversationCost(id);
+      setCost(c);
+    } catch {
+      // ignore — cost is best-effort
+    }
+  }, []);
+
   useEffect(() => {
     if (!conversationId) {
       setMessages([]);
+      setCost(null);
       return;
     }
     void getMessages(conversationId)
@@ -100,7 +132,8 @@ export default function Home() {
       .catch((e) => {
         setStatus(e instanceof Error ? e.message : "failed to load messages");
       });
-  }, [conversationId]);
+    void refreshCost(conversationId);
+  }, [conversationId, refreshCost]);
 
   useEffect(() => {
     const el = messageListRef.current;
@@ -109,16 +142,45 @@ export default function Home() {
 
   useEffect(() => {
     function onEsc(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") abortRef.current?.abort();
+      if (event.key !== "Escape") return;
+      if (pendingDelete) {
+        if (!deleteBusy) setPendingDelete(null);
+        return;
+      }
+      abortRef.current?.abort();
     }
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, []);
+  }, [pendingDelete, deleteBusy]);
 
   async function startNewChat() {
+    abortRef.current?.abort();
     setConversationId(null);
     setMessages([]);
     setStatus("");
+  }
+
+  async function confirmDeleteConversation() {
+    if (!pendingDelete) return;
+    const id = pendingDelete.id;
+    setDeleteBusy(true);
+    try {
+      await deleteConversation(id);
+    } catch (e) {
+      setStatus(
+        e instanceof Error ? e.message : "failed to delete conversation",
+      );
+      setDeleteBusy(false);
+      return;
+    }
+    setConversations((current) => current.filter((c) => c.id !== id));
+    if (conversationId === id) {
+      setConversationId(null);
+      setMessages([]);
+      setCost(null);
+    }
+    setDeleteBusy(false);
+    setPendingDelete(null);
   }
 
   async function send(event: FormEvent) {
@@ -141,6 +203,9 @@ export default function Home() {
         return;
       }
     }
+    const streamConversationId = activeId;
+    const isActive = () =>
+      activeConversationIdRef.current === streamConversationId;
     const now = new Date().toISOString();
     setMessages((current) => [
       ...current,
@@ -155,6 +220,7 @@ export default function Home() {
     setDraft("");
     const controller = new AbortController();
     abortRef.current = controller;
+    let aborted = false;
     try {
       const response = await fetch(
         `${apiUrl}/v1/conversations/${activeId}/messages`,
@@ -164,7 +230,15 @@ export default function Home() {
             "Content-Type": "application/json",
             Accept: "text/event-stream",
           },
-          body: JSON.stringify({ role: "user", content, model }),
+          body: JSON.stringify({
+            role: "user",
+            content,
+            model,
+            thinking:
+              selected.thinking_supported && thinkingEnabled
+                ? { enabled: true, effort: thinkingEffort }
+                : undefined,
+          }),
           signal: controller.signal,
         },
       );
@@ -173,7 +247,28 @@ export default function Home() {
         return;
       }
       for await (const { event: name, data } of readSseStream(response.body)) {
-        if (name === "token") {
+        if (name === "assistant_message") {
+          if (!isActive()) continue;
+          const msgId = String(data.id ?? `local-${Date.now()}`);
+          const createdAt = String(data.created_at ?? new Date().toISOString());
+          setMessages((current) => {
+            const last = current[current.length - 1];
+            if (last?.role === "assistant" && last.status === "pending") {
+              return current;
+            }
+            return [
+              ...current,
+              {
+                id: msgId,
+                role: "assistant",
+                status: "pending",
+                content: "",
+                created_at: createdAt,
+              },
+            ];
+          });
+        } else if (name === "token") {
+          if (!isActive()) continue;
           const delta = String(data.delta ?? "");
           setMessages((current) => {
             const next = [...current];
@@ -194,22 +289,47 @@ export default function Home() {
             }
             return next;
           });
+        } else if (name === "title") {
+          const title = typeof data.title === "string" ? data.title : null;
+          if (title) {
+            setConversations((current) =>
+              current.map((c) =>
+                c.id === streamConversationId ? { ...c, title } : c,
+              ),
+            );
+          }
         } else if (name === "done") {
-          await getMessages(activeId).then(setMessages);
+          if (isActive())
+            await getMessages(streamConversationId).then(setMessages);
         } else if (name === "error") {
+          if (!isActive()) continue;
           const detail = data.error as { message?: string } | undefined;
           setStatus(detail?.message ?? "stream error");
         }
       }
-      await getMessages(activeId).then(setMessages);
+      if (isActive()) await getMessages(streamConversationId).then(setMessages);
       await loadConversations();
+      if (isActive()) await refreshCost(streamConversationId);
     } catch (e) {
-      if ((e as Error).name !== "AbortError") {
-        setStatus(e instanceof Error ? e.message : "send failed");
+      if ((e as Error).name === "AbortError") {
+        aborted = true;
+      } else {
+        if (isActive())
+          setStatus(e instanceof Error ? e.message : "send failed");
       }
     } finally {
       setBusy(false);
       abortRef.current = null;
+      if (aborted && isActive()) {
+        // Backend persists the partial assistant message as `cancelled`; reload
+        // so the stale `pending` row in local state is replaced.
+        try {
+          await getMessages(streamConversationId).then(setMessages);
+        } catch {
+          // best-effort
+        }
+        await loadConversations();
+      }
     }
   }
 
@@ -244,29 +364,48 @@ export default function Home() {
           <MessageSquarePlus className="w-4 h-4" />
           <span>New chat</span>
         </motion.button>
-        
+
         <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
           {conversations.map((c) => (
-            <motion.button
+            <motion.div
               key={c.id}
               whileHover={{ x: 2 }}
-              className={`w-full text-left p-3 rounded-lg border transition-all ${
+              className={`group relative w-full rounded-lg border transition-all ${
                 c.id === conversationId
                   ? "border-[#009f8f]/30 bg-gradient-to-br from-[#009f8f]/10 to-transparent dark:border-[#009f8f]/50 dark:from-[#009f8f]/20 shadow-sm"
                   : "border-black/5 dark:border-white/5 bg-white/50 dark:bg-zinc-800/30 hover:bg-white/80 dark:hover:bg-zinc-800/60"
               }`}
-              onClick={() => {
-                setConversationId(c.id);
-                setModel(c.model_default);
-              }}
             >
-              <span className="block font-semibold text-sm truncate text-zinc-900 dark:text-zinc-100">
-                {c.model_default}
-              </span>
-              <span className="block text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-                {c.message_count} messages
-              </span>
-            </motion.button>
+              <button
+                type="button"
+                className="w-full text-left p-3 pr-10"
+                onClick={() => {
+                  if (c.id !== conversationId) abortRef.current?.abort();
+                  setConversationId(c.id);
+                  setModel(c.model_default);
+                }}
+              >
+                <span className="block font-semibold text-sm truncate text-zinc-900 dark:text-zinc-100">
+                  {c.title ?? c.model_default}
+                </span>
+                <span className="block text-xs text-zinc-500 dark:text-zinc-400 mt-1 truncate">
+                  {c.title ? `${c.model_default} · ` : ""}
+                  {c.message_count} messages
+                </span>
+              </button>
+              <button
+                type="button"
+                aria-label="Delete conversation"
+                title="Delete conversation"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPendingDelete(c);
+                }}
+                className="absolute top-1/2 -translate-y-1/2 right-2 p-1.5 rounded-md text-zinc-400 hover:text-red-500 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </motion.div>
           ))}
         </div>
       </aside>
@@ -288,8 +427,17 @@ export default function Home() {
               {selected.source === "fallback" && <span>· fallback</span>}
             </p>
           </div>
-          
+
           <div className="flex items-center gap-3">
+            {cost && cost.calls > 0 && (
+              <span
+                className="text-xs font-semibold px-2.5 py-1 rounded-full border border-[#009f8f]/30 bg-[#009f8f]/10 text-zinc-700 dark:text-zinc-200"
+                title={`prompt ${cost.prompt_tokens.toLocaleString()} · completion ${cost.completion_tokens.toLocaleString()} · cached ${cost.cached_prompt_tokens.toLocaleString()} · reasoning ${cost.reasoning_tokens.toLocaleString()} · ${cost.calls} call${cost.calls === 1 ? "" : "s"}`}
+              >
+                {formatCostShort(cost.cost_usd)} ·{" "}
+                {formatTokens(cost.prompt_tokens + cost.completion_tokens)} tok
+              </span>
+            )}
             {modelStatus && (
               <span className="text-xs text-zinc-500 hidden sm:inline-block">
                 {modelStatus}
@@ -307,13 +455,13 @@ export default function Home() {
         </header>
 
         {/* Message List */}
-        <div 
-          className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6" 
-          ref={messageListRef} 
+        <div
+          className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6"
+          ref={messageListRef}
           tabIndex={0}
         >
           {messages.length === 0 ? (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               className="max-w-lg mx-auto mt-20 border border-black/5 dark:border-white/5 rounded-2xl bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md p-8 text-center shadow-lg"
@@ -329,16 +477,16 @@ export default function Home() {
               {messages
                 .filter((m) => m.role !== "system")
                 .map((m) => (
-                  <motion.div 
+                  <motion.div
                     initial={{ opacity: 0, y: 10, scale: 0.98 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     key={m.id}
-                    className={`flex flex-col max-w-[85%] ${m.role === 'user' ? 'ml-auto items-end' : 'mr-auto items-start'}`}
+                    className={`flex flex-col max-w-[85%] ${m.role === "user" ? "ml-auto items-end" : "mr-auto items-start"}`}
                   >
                     <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1.5 pl-1">
                       {m.role}
                     </div>
-                    
+
                     {m.thinking_trace && (
                       <details className="mb-2 w-full max-w-full border border-[#2453ff]/10 dark:border-[#2453ff]/20 rounded-xl bg-[#2453ff]/5 dark:bg-[#2453ff]/10 text-zinc-800 dark:text-zinc-200 text-sm overflow-hidden group">
                         <summary className="cursor-pointer px-4 py-2.5 font-semibold hover:bg-black/5 dark:hover:bg-white/5 transition-colors select-none">
@@ -349,20 +497,32 @@ export default function Home() {
                         </div>
                       </details>
                     )}
-                    
-                    <div className={`px-5 py-3.5 rounded-2xl shadow-sm text-[15px] leading-relaxed whitespace-pre-wrap break-words ${
-                      m.role === 'user' 
-                        ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 rounded-tr-sm' 
-                        : 'bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 border border-black/5 dark:border-white/5 rounded-tl-sm shadow-[0_4px_12px_rgba(0,0,0,0.02)]'
-                    }`}>
-                      {m.content}
+
+                    <div
+                      className={`px-5 py-3.5 rounded-2xl shadow-sm text-[15px] leading-relaxed whitespace-pre-wrap break-words ${
+                        m.role === "user"
+                          ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 rounded-tr-sm"
+                          : "bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 border border-black/5 dark:border-white/5 rounded-tl-sm shadow-[0_4px_12px_rgba(0,0,0,0.02)]"
+                      }`}
+                    >
+                      {m.role === "assistant" &&
+                      m.status === "pending" &&
+                      !m.content ? (
+                        <TypingDots />
+                      ) : (
+                        m.content
+                      )}
                     </div>
                   </motion.div>
                 ))}
             </AnimatePresence>
           )}
           {status && (
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center text-sm font-medium text-[#ff6d4d]">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="text-center text-sm font-medium text-[#ff6d4d]"
+            >
               {status}
             </motion.div>
           )}
@@ -370,7 +530,7 @@ export default function Home() {
 
         {/* Composer */}
         <div className="p-4 md:p-6 bg-transparent shrink-0">
-          <form 
+          <form
             className="max-w-4xl mx-auto flex flex-col gap-2 rounded-2xl border border-black/10 dark:border-white/10 bg-white/70 dark:bg-zinc-900/70 p-3 shadow-[0_8px_32px_rgba(0,0,0,0.04)] backdrop-blur-xl focus-within:border-[#009f8f]/50 focus-within:ring-2 focus-within:ring-[#009f8f]/10 transition-all"
             onSubmit={send}
           >
@@ -381,10 +541,12 @@ export default function Home() {
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 aria-label="Model"
-                style={{ WebkitAppearance: 'none', MozAppearance: 'none' }}
+                style={{ WebkitAppearance: "none", MozAppearance: "none" }}
               >
                 {providerGroups.length === 0 ? (
-                  <option value={fallbackModel.id}>{fallbackModel.label}</option>
+                  <option value={fallbackModel.id}>
+                    {fallbackModel.label}
+                  </option>
                 ) : (
                   providerGroups.map(([provider, items]) => (
                     <optgroup key={provider} label={provider}>
@@ -398,8 +560,47 @@ export default function Home() {
                   ))
                 )}
               </select>
+              {selected.thinking_supported && (
+                <div className="ml-auto flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
+                  <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={thinkingEnabled}
+                      onChange={(e) => setThinkingEnabled(e.target.checked)}
+                      className="accent-[#2453ff]"
+                    />
+                    <span className="font-semibold">Thinking</span>
+                  </label>
+                  {thinkingEnabled && (
+                    <div
+                      role="radiogroup"
+                      aria-label="Thinking effort"
+                      className="flex items-center gap-0.5 rounded-md border border-zinc-300 dark:border-zinc-700 p-0.5"
+                    >
+                      {(["low", "medium", "high", "xhigh", "max"] as const).map(
+                        (level) => (
+                          <button
+                            key={level}
+                            type="button"
+                            role="radio"
+                            aria-checked={thinkingEffort === level}
+                            onClick={() => setThinkingEffort(level)}
+                            className={`px-1.5 py-0.5 rounded text-[11px] font-medium uppercase tracking-wide transition-colors ${
+                              thinkingEffort === level
+                                ? "bg-[#2453ff] text-white"
+                                : "text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                            }`}
+                          >
+                            {level}
+                          </button>
+                        ),
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            
+
             <div className="flex items-end gap-3 w-full">
               <textarea
                 value={draft}
@@ -430,8 +631,8 @@ export default function Home() {
                   whileTap={{ scale: draft.trim() ? 0.95 : 1 }}
                   className={`p-3 mb-0.5 mr-0.5 rounded-xl flex items-center justify-center transition-all ${
                     !draft.trim()
-                      ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed'
-                      : 'bg-gradient-to-br from-[#ff6d4d] to-[#2453ff] text-white shadow-lg shadow-[#ff6d4d]/20 hover:shadow-[#2453ff]/30'
+                      ? "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 cursor-not-allowed"
+                      : "bg-gradient-to-br from-[#ff6d4d] to-[#2453ff] text-white shadow-lg shadow-[#ff6d4d]/20 hover:shadow-[#2453ff]/30"
                   }`}
                   disabled={!draft.trim()}
                 >
@@ -441,10 +642,100 @@ export default function Home() {
             </div>
           </form>
           <div className="text-center mt-3 text-[11px] text-zinc-400 dark:text-zinc-500 font-medium tracking-wide">
-            Prism securely processes your data locally and via configured providers.
+            Prism securely processes your data locally and via configured
+            providers.
           </div>
         </div>
       </section>
+      <AnimatePresence>
+        {pendingDelete && (
+          <motion.div
+            key="delete-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+            onClick={() => !deleteBusy && setPendingDelete(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-conversation-title"
+          >
+            <motion.div
+              key="delete-card"
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.15 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-sm rounded-2xl bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 shadow-2xl p-6"
+            >
+              <div className="flex items-start gap-3">
+                <div className="shrink-0 w-10 h-10 rounded-full bg-red-500/10 text-red-500 flex items-center justify-center">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2
+                    id="delete-conversation-title"
+                    className="text-base font-semibold text-zinc-900 dark:text-zinc-100"
+                  >
+                    Delete conversation?
+                  </h2>
+                  <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                    “{pendingDelete.title ?? pendingDelete.model_default}” and
+                    all its messages will be permanently removed.
+                  </p>
+                </div>
+              </div>
+              <div className="mt-6 flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={() => setPendingDelete(null)}
+                  className="px-4 py-2 rounded-lg text-sm font-semibold text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={() => void confirmDeleteConversation()}
+                  className="px-4 py-2 rounded-lg text-sm font-semibold bg-red-600 text-white hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
+                >
+                  {deleteBusy ? "Deleting…" : "Delete"}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
+}
+
+function TypingDots() {
+  return (
+    <span className="inline-flex items-center gap-1 h-5">
+      {[0, 1, 2].map((i) => (
+        <motion.span
+          key={i}
+          className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500"
+          animate={{ opacity: [0.3, 1, 0.3], y: [0, -2, 0] }}
+          transition={{ duration: 1, repeat: Infinity, delay: i * 0.15 }}
+        />
+      ))}
+    </span>
+  );
+}
+
+function formatCostShort(v: number): string {
+  if (!Number.isFinite(v) || v === 0) return "$0";
+  if (v >= 1) return `$${v.toFixed(2)}`;
+  if (v >= 0.01) return `$${v.toFixed(3)}`;
+  return `$${v.toFixed(4)}`;
+}
+
+function formatTokens(v: number): string {
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
+  return v.toString();
 }
