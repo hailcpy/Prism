@@ -89,12 +89,75 @@ class InMemoryLogStore:
         start: datetime,
         end: datetime,
         percentile: float,
+        column: str = "latency_ms",
         models: tuple[str, ...] = (),
         providers: tuple[str, ...] = (),
     ) -> float:
-        if not 0.0 < percentile < 1.0:
-            raise ValueError("percentile must be in (0, 1)")
-        values: list[int] = []
+        values = [
+            v
+            for _, _, v in self._collect_percentile_inputs(
+                start=start,
+                end=end,
+                column=column,
+                models=models,
+                providers=providers,
+                by_bucket=False,
+                bucket_seconds=60,
+                group_by=None,
+            )
+        ]
+        if not values:
+            return 0.0
+        return _percentile_cont(values, percentile)
+
+    def get_log_percentile_series(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        percentile: float,
+        column: str = "latency_ms",
+        models: tuple[str, ...] = (),
+        providers: tuple[str, ...] = (),
+        by_bucket: bool = False,
+        bucket_seconds: int = 60,
+        group_by: str | None = None,
+    ) -> list[tuple[datetime | None, str | None, float]]:
+        if group_by is not None and group_by not in {"model", "provider"}:
+            raise ValueError("group_by must be one of: model, provider")
+        groups: dict[tuple[datetime | None, str | None], list[int]] = {}
+        for bucket, grp, value in self._collect_percentile_inputs(
+            start=start,
+            end=end,
+            column=column,
+            models=models,
+            providers=providers,
+            by_bucket=by_bucket,
+            bucket_seconds=bucket_seconds,
+            group_by=group_by,
+        ):
+            groups.setdefault((bucket, grp), []).append(value)
+        rows = [
+            (bucket, grp, _percentile_cont(values, percentile))
+            for (bucket, grp), values in groups.items()
+        ]
+        return sorted(rows, key=lambda r: (r[0] or datetime.min.replace(tzinfo=UTC), r[1] or ""))
+
+    def _collect_percentile_inputs(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        column: str,
+        models: tuple[str, ...],
+        providers: tuple[str, ...],
+        by_bucket: bool,
+        bucket_seconds: int,
+        group_by: str | None,
+    ) -> list[tuple[datetime | None, str | None, int]]:
+        if column not in {"latency_ms", "ttft_ms"}:
+            raise ValueError("column must be latency_ms or ttft_ms")
+        out: list[tuple[datetime | None, str | None, int]] = []
         for event in self.logs:
             created = event.created_at
             if created is None:
@@ -103,21 +166,26 @@ class InMemoryLogStore:
                 created = created.replace(tzinfo=UTC)
             if not (start <= created < end):
                 continue
-            if event.status != "ok" or event.latency_ms is None:
+            if event.status != "ok":
+                continue
+            value = event.latency_ms if column == "latency_ms" else event.ttft_ms
+            if value is None:
                 continue
             if models and event.model not in models:
                 continue
             if providers and event.provider not in providers:
                 continue
-            values.append(event.latency_ms)
-        if not values:
-            return 0.0
-        values.sort()
-        # Linear interpolation, matching percentile_cont.
-        rank = percentile * (len(values) - 1)
-        low = int(rank)
-        high = min(low + 1, len(values) - 1)
-        return values[low] + (values[high] - values[low]) * (rank - low)
+            bucket = None
+            if by_bucket:
+                epoch = int(created.timestamp())
+                bucket = datetime.fromtimestamp((epoch // bucket_seconds) * bucket_seconds, tz=UTC)
+            grp = None
+            if group_by == "model":
+                grp = event.model
+            elif group_by == "provider":
+                grp = event.provider
+            out.append((bucket, grp, value))
+        return out
 
     def get_metric_dimensions(self) -> tuple[list[str], list[str]]:
         models = sorted({row.model for row in self.metrics.values() if row.model})
@@ -141,13 +209,14 @@ def _build_metrics_row(
     bucket: datetime, model: str, provider: str, events: list[InferenceEvent]
 ) -> MetricsRow:
     latencies = sorted(e.latency_ms for e in events)
+    ttfts = sorted(e.ttft_ms for e in events if e.ttft_ms is not None)
     n = len(latencies)
 
-    def pct(q: float) -> int:
-        if not latencies:
+    def pct_disc(values: list[int], q: float) -> int:
+        if not values:
             return 0
-        idx = max(0, min(n - 1, int(-(-n * q // 1)) - 1))
-        return latencies[idx]
+        idx = max(0, min(len(values) - 1, int(-(-len(values) * q // 1)) - 1))
+        return values[idx]
 
     return MetricsRow(
         minute_bucket=bucket,
@@ -155,12 +224,26 @@ def _build_metrics_row(
         provider=provider,
         count=n,
         error_count=sum(1 for e in events if e.status != "ok"),
-        latency_p50_ms=pct(0.50),
-        latency_p95_ms=pct(0.95),
+        latency_p50_ms=pct_disc(latencies, 0.50),
+        latency_p95_ms=pct_disc(latencies, 0.95),
+        ttft_p50_ms=pct_disc(ttfts, 0.50) if ttfts else None,
+        ttft_p95_ms=pct_disc(ttfts, 0.95) if ttfts else None,
         prompt_tokens_sum=sum(e.usage.prompt_tokens or 0 for e in events),
         completion_tokens_sum=sum(e.usage.completion_tokens or 0 for e in events),
         cost_usd_sum=sum(e.cost_usd or 0.0 for e in events),
     )
+
+
+def _percentile_cont(values: list[int], percentile: float) -> float:
+    if not 0.0 < percentile < 1.0:
+        raise ValueError("percentile must be in (0, 1)")
+    if not values:
+        return 0.0
+    values = sorted(values)
+    rank = percentile * (len(values) - 1)
+    low = int(rank)
+    high = min(low + 1, len(values) - 1)
+    return values[low] + (values[high] - values[low]) * (rank - low)
 
 
 class JsonbRawPayloadStore:

@@ -23,6 +23,8 @@ MetricKind = Literal[
     "error_rate",
     "latency_p50_ms",
     "latency_p95_ms",
+    "ttft_p50_ms",
+    "ttft_p95_ms",
     "prompt_tokens_sum",
     "completion_tokens_sum",
     "top_conversations_by_cost",
@@ -35,8 +37,17 @@ METRICS_MINUTE_KINDS: set[str] = {
     "error_rate",
     "latency_p50_ms",
     "latency_p95_ms",
+    "ttft_p50_ms",
+    "ttft_p95_ms",
     "prompt_tokens_sum",
     "completion_tokens_sum",
+}
+
+PERCENTILE_KINDS: dict[str, tuple[str, float]] = {
+    "latency_p50_ms": ("latency_ms", 0.50),
+    "latency_p95_ms": ("latency_ms", 0.95),
+    "ttft_p50_ms": ("ttft_ms", 0.50),
+    "ttft_p95_ms": ("ttft_ms", 0.95),
 }
 
 
@@ -258,22 +269,13 @@ def _resolve_widget(
 
     metric_kind = cast(str, widget.metric_kind)
 
-    # bignum latency percentiles bypass the per-minute rollup: averaging
-    # per-minute p50/p95 across a window does NOT yield the true window
-    # percentile. Hit `inference_logs` directly via the LogStore seam (the
-    # equivalent of ClickHouse `quantile()` lives behind this method too).
-    if widget.kind == "bignum" and metric_kind in {"latency_p50_ms", "latency_p95_ms"}:
-        percentile = 0.5 if metric_kind == "latency_p50_ms" else 0.95
-        return {
-            "kind": "bignum",
-            "value": log_store.get_log_percentile(
-                start=start,
-                end=end,
-                percentile=percentile,
-                models=tuple(widget.filters.model),
-                providers=tuple(widget.filters.provider),
-            ),
-        }
+    # Percentile metrics (latency_p*/ttft_p*) bypass the per-minute rollup:
+    # aggregating per-bucket percentiles across buckets or groups does not
+    # yield the true percentile. Compute from inference_logs directly.
+    if metric_kind in PERCENTILE_KINDS:
+        return _resolve_percentile_widget(
+            widget, metric_kind, start=start, end=end, log_store=log_store
+        )
 
     rows = log_store.get_metrics(
         MetricsQuery(
@@ -377,6 +379,84 @@ def _resolve_table(
         "rows": [
             {group_by: key, "value": _aggregate_scalar(group_rows, metric_kind)}
             for key, group_rows in sorted(grouped.items())
+        ],
+    }
+
+
+def _resolve_percentile_widget(
+    widget: Widget,
+    metric_kind: str,
+    *,
+    start: datetime,
+    end: datetime,
+    log_store: LogStore,
+) -> dict[str, Any]:
+    column, percentile = PERCENTILE_KINDS[metric_kind]
+    models = tuple(widget.filters.model)
+    providers = tuple(widget.filters.provider)
+
+    def series(
+        *, by_bucket: bool, group_by: str | None
+    ) -> list[tuple[datetime | None, str | None, float]]:
+        return log_store.get_log_percentile_series(
+            start=start,
+            end=end,
+            percentile=percentile,
+            column=column,
+            models=models,
+            providers=providers,
+            by_bucket=by_bucket,
+            group_by=group_by,
+        )
+
+    if widget.kind == "bignum":
+        return {
+            "kind": "bignum",
+            "value": log_store.get_log_percentile(
+                start=start,
+                end=end,
+                percentile=percentile,
+                column=column,
+                models=models,
+                providers=providers,
+            ),
+        }
+    if widget.kind == "timeseries":
+        rows = series(by_bucket=True, group_by=widget.options.group_by)
+        series: dict[str, list[dict[str, Any]]] = {}
+        for bucket, grp, value in rows:
+            if bucket is None:
+                continue
+            key = grp if widget.options.group_by else "all"
+            series.setdefault(key or "all", []).append(
+                {"bucket": bucket.isoformat(), "value": value}
+            )
+        return {"kind": "timeseries", "group_by": widget.options.group_by, "series": series}
+    if widget.kind == "pie":
+        group_by = widget.options.group_by or "model"
+        rows = series(by_bucket=False, group_by=group_by)
+        slices = [
+            {"label": grp or "(none)", "value": value} for _, grp, value in rows if grp is not None
+        ]
+        slices.sort(key=lambda item: item["value"], reverse=True)
+        return {"kind": "pie", "group_by": group_by, "slices": slices}
+    # table
+    if widget.options.group_by is None:
+        rows = series(by_bucket=True, group_by=None)
+        return {
+            "kind": "table",
+            "columns": ["bucket", "value"],
+            "rows": [
+                {"bucket": bucket.isoformat() if bucket else "", "value": value}
+                for bucket, _, value in rows
+            ],
+        }
+    rows = series(by_bucket=False, group_by=widget.options.group_by)
+    return {
+        "kind": "table",
+        "columns": [widget.options.group_by, "value"],
+        "rows": [
+            {widget.options.group_by: grp or "(none)", "value": value} for _, grp, value in rows
         ],
     }
 
