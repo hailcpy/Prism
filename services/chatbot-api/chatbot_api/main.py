@@ -383,14 +383,22 @@ def web_search(query: str, max_results: int = 5) -> str:
 
 
 @contextlib.asynccontextmanager
-async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(app_: FastAPI) -> AsyncIterator[None]:
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         try:
             await asyncio.to_thread(run_migrations, database_url)
         except Exception:
             logging.getLogger(__name__).exception("startup migrations failed")
-    yield
+    try:
+        yield
+    finally:
+        client = getattr(app_.state, "prism_client", None)
+        if client is not None:
+            try:
+                await asyncio.to_thread(client.close)
+            except Exception:
+                logging.getLogger(__name__).exception("prism client shutdown failed")
 
 
 app = FastAPI(title="prism-chatbot-api", version="0.1.0", lifespan=_lifespan)
