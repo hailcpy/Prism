@@ -202,7 +202,7 @@ def _sanitize_event(
         model=body.model,
         provider=body.provider,
         status=body.status,
-        error=_error_from_body(body.error),
+        error=_error_from_body(body.error, redactor),
         ts_start=body.ts_start,
         ts_end=body.ts_end,
         latency_ms=body.latency_ms,
@@ -219,7 +219,7 @@ def _sanitize_event(
         response_preview=redactor.redact_text(body.response_preview),
         raw_payload_uri=raw_payload_uri,
         raw_payload_jsonb=raw_payload_jsonb,
-        metadata=body.metadata,
+        metadata=redactor.redact_json(body.metadata),
         sdk_version=body.sdk_version,
         created_at=datetime.now(UTC),
     )
@@ -235,26 +235,30 @@ def _sanitize_tool_event(body: ToolEventBody, redactor: Redactor) -> ToolInvocat
         arguments_preview=redactor.redact_text(body.arguments_preview) or "",
         result_preview=redactor.redact_text(body.result_preview),
         status=body.status,
-        error=_tool_error_from_body(body.error),
+        error=_tool_error_from_body(body.error, redactor),
         ts_start=body.ts_start,
         ts_end=body.ts_end,
         latency_ms=body.latency_ms,
-        metadata=body.metadata,
+        metadata=redactor.redact_json(body.metadata),
         sdk_version=body.sdk_version,
         created_at=datetime.now(UTC),
     )
 
 
-def _error_from_body(error: ErrorBody | None) -> ErrorInfo | None:
+def _error_from_body(error: ErrorBody | None, redactor: Redactor) -> ErrorInfo | None:
     if error is None:
         return None
-    return ErrorInfo(type=error.type, message=error.message, provider_code=error.provider_code)
+    return ErrorInfo(
+        type=error.type,
+        message=redactor.redact_text(error.message) or "",
+        provider_code=error.provider_code,
+    )
 
 
-def _tool_error_from_body(error: ToolErrorBody | None) -> ToolErrorInfo | None:
+def _tool_error_from_body(error: ToolErrorBody | None, redactor: Redactor) -> ToolErrorInfo | None:
     if error is None:
         return None
-    return ToolErrorInfo(type=error.type, message=error.message)
+    return ToolErrorInfo(type=error.type, message=redactor.redact_text(error.message) or "")
 
 
 def _validation_reason(exc: ValidationError) -> str:
