@@ -256,6 +256,25 @@ def _resolve_widget(
             ],
         }
 
+    metric_kind = cast(str, widget.metric_kind)
+
+    # bignum latency percentiles bypass the per-minute rollup: averaging
+    # per-minute p50/p95 across a window does NOT yield the true window
+    # percentile. Hit `inference_logs` directly via the LogStore seam (the
+    # equivalent of ClickHouse `quantile()` lives behind this method too).
+    if widget.kind == "bignum" and metric_kind in {"latency_p50_ms", "latency_p95_ms"}:
+        percentile = 0.5 if metric_kind == "latency_p50_ms" else 0.95
+        return {
+            "kind": "bignum",
+            "value": log_store.get_log_percentile(
+                start=start,
+                end=end,
+                percentile=percentile,
+                models=tuple(widget.filters.model),
+                providers=tuple(widget.filters.provider),
+            ),
+        }
+
     rows = log_store.get_metrics(
         MetricsQuery(
             start=start,
@@ -264,7 +283,6 @@ def _resolve_widget(
             providers=tuple(widget.filters.provider),
         )
     )
-    metric_kind = cast(str, widget.metric_kind)
 
     if widget.kind == "timeseries":
         return _resolve_timeseries(rows, metric_kind, widget.options.group_by)

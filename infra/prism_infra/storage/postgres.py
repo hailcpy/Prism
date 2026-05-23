@@ -175,6 +175,39 @@ class PostgresLogStore:
             cur.execute(sql, params)
             return [MetricsRow(**row) for row in cur.fetchall()]
 
+    def get_log_percentile(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        percentile: float,
+        models: tuple[str, ...] = (),
+        providers: tuple[str, ...] = (),
+    ) -> float:
+        if not 0.0 < percentile < 1.0:
+            raise ValueError("percentile must be in (0, 1)")
+        sql = """
+            SELECT COALESCE(
+                percentile_cont(%(p)s) WITHIN GROUP (ORDER BY latency_ms),
+                0
+            )
+            FROM inference_logs
+            WHERE created_at >= %(start)s AND created_at < %(end)s
+              AND status = 'ok'
+              AND latency_ms IS NOT NULL
+        """
+        params: dict[str, Any] = {"start": start, "end": end, "p": percentile}
+        if models:
+            sql += " AND model = ANY(%(models)s)"
+            params["models"] = list(models)
+        if providers:
+            sql += " AND provider = ANY(%(providers)s)"
+            params["providers"] = list(providers)
+        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            return float(row[0]) if row and row[0] is not None else 0.0
+
     def get_metric_dimensions(self) -> tuple[list[str], list[str]]:
         with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
             cur.execute(

@@ -22,6 +22,16 @@ class LogStore(Protocol):
 
     def get_metrics(self, query: MetricsQuery) -> list[MetricsRow]: ...
 
+    def get_log_percentile(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        percentile: float,
+        models: tuple[str, ...] = (),
+        providers: tuple[str, ...] = (),
+    ) -> float: ...
+
     def get_logs(self, query: LogsQuery) -> list[InferenceEvent]: ...
 
     def reconcile_metrics(self, start: datetime, end: datetime) -> int: ...

@@ -83,6 +83,42 @@ class InMemoryLogStore:
             cost_usd=sum(e.cost_usd or 0.0 for e in matches),
         )
 
+    def get_log_percentile(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        percentile: float,
+        models: tuple[str, ...] = (),
+        providers: tuple[str, ...] = (),
+    ) -> float:
+        if not 0.0 < percentile < 1.0:
+            raise ValueError("percentile must be in (0, 1)")
+        values: list[int] = []
+        for event in self.logs:
+            created = event.created_at
+            if created is None:
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=UTC)
+            if not (start <= created < end):
+                continue
+            if event.status != "ok" or event.latency_ms is None:
+                continue
+            if models and event.model not in models:
+                continue
+            if providers and event.provider not in providers:
+                continue
+            values.append(event.latency_ms)
+        if not values:
+            return 0.0
+        values.sort()
+        # Linear interpolation, matching percentile_cont.
+        rank = percentile * (len(values) - 1)
+        low = int(rank)
+        high = min(low + 1, len(values) - 1)
+        return values[low] + (values[high] - values[low]) * (rank - low)
+
     def get_metric_dimensions(self) -> tuple[list[str], list[str]]:
         models = sorted({row.model for row in self.metrics.values() if row.model})
         providers = sorted({row.provider for row in self.metrics.values() if row.provider})
