@@ -34,7 +34,16 @@ def metadata(
     The chatbot (or any caller) must attach this so prism can correlate the
     captured inference back to a chat message. `extra` ends up verbatim in
     inference_logs.metadata_jsonb.
+
+    Correlation IDs are not strictly validated here (the ingestion API does
+    Pydantic UUID validation and surfaces rejections per-event); non-UUID
+    values get logged at WARNING so misuse is visible without crashing the
+    LLM call.
     """
+    _warn_if_not_uuid("conversation_id", conversation_id)
+    _warn_if_not_uuid("message_id", message_id)
+    if inference_id is not None:
+        _warn_if_not_uuid("inference_id", inference_id)
     prism = {
         "conversation_id": conversation_id,
         "message_id": message_id,
@@ -44,6 +53,17 @@ def metadata(
     if provider is not None:
         prism["provider"] = provider
     return {"prism": prism}
+
+
+def _warn_if_not_uuid(field: str, value: str) -> None:
+    try:
+        uuid.UUID(str(value))
+    except (TypeError, ValueError):
+        log.warning(
+            "prism_sdk.metadata: %s=%r is not a UUID; ingestion will reject this event",
+            field,
+            value,
+        )
 
 
 class PrismClient:
@@ -158,8 +178,23 @@ class PrismClient:
                     log.warning(
                         "dropping prism batch after ingestion returned %s", response.status_code
                     )
+                else:
+                    self._log_partial_rejections(response)
         except httpx.HTTPError:
             self._requeue(batch)
+
+    def _log_partial_rejections(self, response: httpx.Response) -> None:
+        try:
+            payload = response.json()
+        except ValueError:
+            return
+        rejected = payload.get("rejected") if isinstance(payload, dict) else None
+        if isinstance(rejected, list) and rejected:
+            log.warning(
+                "prism ingestion rejected %d events: %s",
+                len(rejected),
+                rejected[:5],
+            )
 
     def _requeue(self, batch: list[dict[str, Any]]) -> None:
         for event in batch:
