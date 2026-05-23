@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 from psycopg import sql
@@ -133,12 +133,13 @@ class PostgresLogStore:
                 """
                 INSERT INTO metrics_minute (
                   minute_bucket, model, provider, count, error_count,
-                  latency_p50_ms, latency_p95_ms, prompt_tokens_sum,
-                  completion_tokens_sum, cost_usd_sum
+                  latency_p50_ms, latency_p95_ms, ttft_p50_ms, ttft_p95_ms,
+                  prompt_tokens_sum, completion_tokens_sum, cost_usd_sum
                 )
                 VALUES (
                   %(minute_bucket)s, %(model)s, %(provider)s, %(count)s,
                   %(error_count)s, %(latency_p50_ms)s, %(latency_p95_ms)s,
+                  %(ttft_p50_ms)s, %(ttft_p95_ms)s,
                   %(prompt_tokens_sum)s, %(completion_tokens_sum)s,
                   %(cost_usd_sum)s
                 )
@@ -147,6 +148,8 @@ class PostgresLogStore:
                   error_count = EXCLUDED.error_count,
                   latency_p50_ms = EXCLUDED.latency_p50_ms,
                   latency_p95_ms = EXCLUDED.latency_p95_ms,
+                  ttft_p50_ms = EXCLUDED.ttft_p50_ms,
+                  ttft_p95_ms = EXCLUDED.ttft_p95_ms,
                   prompt_tokens_sum = EXCLUDED.prompt_tokens_sum,
                   completion_tokens_sum = EXCLUDED.completion_tokens_sum,
                   cost_usd_sum = EXCLUDED.cost_usd_sum
@@ -157,7 +160,9 @@ class PostgresLogStore:
     def get_metrics(self, query: MetricsQuery) -> list[MetricsRow]:
         sql = """
             SELECT minute_bucket, model, provider, count, error_count,
-                   latency_p50_ms, latency_p95_ms, prompt_tokens_sum,
+                   latency_p50_ms, latency_p95_ms,
+                   ttft_p50_ms, ttft_p95_ms,
+                   prompt_tokens_sum,
                    completion_tokens_sum, cost_usd_sum
             FROM metrics_minute
             WHERE minute_bucket >= %(start)s AND minute_bucket < %(end)s
@@ -174,6 +179,133 @@ class PostgresLogStore:
         with psycopg.connect(self.database_url) as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(sql, params)
             return [MetricsRow(**row) for row in cur.fetchall()]
+
+    _PERCENTILE_COLUMNS: tuple[str, ...] = ("latency_ms", "ttft_ms")
+
+    def get_log_percentile(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        percentile: float,
+        column: str = "latency_ms",
+        models: tuple[str, ...] = (),
+        providers: tuple[str, ...] = (),
+    ) -> float:
+        self._check_percentile(percentile)
+        col = self._check_column(column)
+        sql_text = f"""
+            SELECT COALESCE(
+                percentile_cont(%(p)s) WITHIN GROUP (ORDER BY {col}),
+                0
+            )
+            FROM inference_logs
+            WHERE created_at >= %(start)s AND created_at < %(end)s
+              AND status = 'ok'
+              AND {col} IS NOT NULL
+        """
+        params: dict[str, Any] = {"start": start, "end": end, "p": percentile}
+        sql_text, params = self._apply_dim_filters(sql_text, params, models, providers)
+        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            cur.execute(cast(Any, sql_text), params)
+            row = cur.fetchone()
+            return float(row[0]) if row and row[0] is not None else 0.0
+
+    def get_log_percentile_series(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        percentile: float,
+        column: str = "latency_ms",
+        models: tuple[str, ...] = (),
+        providers: tuple[str, ...] = (),
+        by_bucket: bool = False,
+        bucket_seconds: int = 60,
+        group_by: str | None = None,
+    ) -> list[tuple[datetime | None, str | None, float]]:
+        """Bucket/group-aware true percentile over inference_logs.
+
+        Each returned tuple is `(bucket_or_none, group_label_or_none, value)`.
+        Use this for timeseries/pie/table latency or TTFT widgets — averaging
+        per-minute p50/p95 across buckets/groups is mathematically wrong.
+        """
+        self._check_percentile(percentile)
+        col = self._check_column(column)
+        if group_by is not None and group_by not in {"model", "provider"}:
+            raise ValueError("group_by must be one of: model, provider")
+
+        select_parts = []
+        group_parts = []
+        order_parts = []
+        if by_bucket:
+            select_parts.append(
+                "to_timestamp(floor(extract(epoch from created_at) / %(bw)s) * %(bw)s) "
+                "AT TIME ZONE 'UTC' AS bucket"
+            )
+            group_parts.append("bucket")
+            order_parts.append("bucket")
+        else:
+            select_parts.append("NULL::timestamptz AS bucket")
+        if group_by is not None:
+            select_parts.append(f"{group_by} AS grp")
+            group_parts.append("grp")
+            order_parts.append("grp")
+        else:
+            select_parts.append("NULL::text AS grp")
+        select_parts.append(
+            f"COALESCE(percentile_cont(%(p)s) WITHIN GROUP (ORDER BY {col}), 0) AS value"
+        )
+
+        sql_text = (
+            f"SELECT {', '.join(select_parts)} FROM inference_logs "
+            "WHERE created_at >= %(start)s AND created_at < %(end)s "
+            f"AND status = 'ok' AND {col} IS NOT NULL"
+        )
+        params: dict[str, Any] = {
+            "start": start,
+            "end": end,
+            "p": percentile,
+            "bw": bucket_seconds,
+        }
+        sql_text, params = self._apply_dim_filters(sql_text, params, models, providers)
+        if group_parts:
+            sql_text += " GROUP BY " + ", ".join(group_parts)
+        if order_parts:
+            sql_text += " ORDER BY " + ", ".join(order_parts)
+
+        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            cur.execute(cast(Any, sql_text), params)
+            return [
+                (row[0], row[1], float(row[2]) if row[2] is not None else 0.0)
+                for row in cur.fetchall()
+            ]
+
+    @staticmethod
+    def _check_percentile(p: float) -> None:
+        if not 0.0 < p < 1.0:
+            raise ValueError("percentile must be in (0, 1)")
+
+    @classmethod
+    def _check_column(cls, column: str) -> str:
+        if column not in cls._PERCENTILE_COLUMNS:
+            raise ValueError(f"column must be one of: {cls._PERCENTILE_COLUMNS}")
+        return column
+
+    @staticmethod
+    def _apply_dim_filters(
+        sql_text: str,
+        params: dict[str, Any],
+        models: tuple[str, ...],
+        providers: tuple[str, ...],
+    ) -> tuple[str, dict[str, Any]]:
+        if models:
+            sql_text += " AND model = ANY(%(models)s)"
+            params["models"] = list(models)
+        if providers:
+            sql_text += " AND provider = ANY(%(providers)s)"
+            params["providers"] = list(providers)
+        return sql_text, params
 
     def get_metric_dimensions(self) -> tuple[list[str], list[str]]:
         with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
@@ -254,8 +386,8 @@ class PostgresLogStore:
                 """
                 INSERT INTO metrics_minute (
                   minute_bucket, model, provider, count, error_count,
-                  latency_p50_ms, latency_p95_ms, prompt_tokens_sum,
-                  completion_tokens_sum, cost_usd_sum
+                  latency_p50_ms, latency_p95_ms, ttft_p50_ms, ttft_p95_ms,
+                  prompt_tokens_sum, completion_tokens_sum, cost_usd_sum
                 )
                 SELECT
                   date_trunc('minute', created_at) AS minute_bucket,
@@ -267,6 +399,10 @@ class PostgresLogStore:
                     AS latency_p50_ms,
                   COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::int
                     AS latency_p95_ms,
+                  percentile_disc(0.50) WITHIN GROUP (ORDER BY ttft_ms)
+                    FILTER (WHERE ttft_ms IS NOT NULL)::int AS ttft_p50_ms,
+                  percentile_disc(0.95) WITHIN GROUP (ORDER BY ttft_ms)
+                    FILTER (WHERE ttft_ms IS NOT NULL)::int AS ttft_p95_ms,
                   COALESCE(sum(prompt_tokens), 0)::bigint AS prompt_tokens_sum,
                   COALESCE(sum(completion_tokens), 0)::bigint AS completion_tokens_sum,
                   COALESCE(sum(cost_usd), 0)::double precision AS cost_usd_sum
@@ -278,6 +414,8 @@ class PostgresLogStore:
                   error_count = EXCLUDED.error_count,
                   latency_p50_ms = EXCLUDED.latency_p50_ms,
                   latency_p95_ms = EXCLUDED.latency_p95_ms,
+                  ttft_p50_ms = EXCLUDED.ttft_p50_ms,
+                  ttft_p95_ms = EXCLUDED.ttft_p95_ms,
                   prompt_tokens_sum = EXCLUDED.prompt_tokens_sum,
                   completion_tokens_sum = EXCLUDED.completion_tokens_sum,
                   cost_usd_sum = EXCLUDED.cost_usd_sum

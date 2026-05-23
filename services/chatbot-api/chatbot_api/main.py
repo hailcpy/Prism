@@ -386,14 +386,22 @@ def web_search(query: str, max_results: int = 5) -> str:
 
 
 @contextlib.asynccontextmanager
-async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(app_: FastAPI) -> AsyncIterator[None]:
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         try:
             await asyncio.to_thread(run_migrations, database_url)
         except Exception:
             logging.getLogger(__name__).exception("startup migrations failed")
-    yield
+    try:
+        yield
+    finally:
+        client = getattr(app_.state, "prism_client", None)
+        if client is not None:
+            try:
+                await asyncio.to_thread(client.close)
+            except Exception:
+                logging.getLogger(__name__).exception("prism client shutdown failed")
 
 
 app = FastAPI(title="prism-chatbot-api", version="0.1.0", lifespan=_lifespan)
@@ -1007,6 +1015,8 @@ class MetricsBucket(BaseModel):
     error_count: int
     latency_p50_ms: int
     latency_p95_ms: int
+    ttft_p50_ms: int | None = None
+    ttft_p95_ms: int | None = None
     prompt_tokens_sum: int
     completion_tokens_sum: int
     cost_usd_sum: float = 0.0
@@ -1066,6 +1076,8 @@ def get_metrics(
                 error_count=row.error_count,
                 latency_p50_ms=row.latency_p50_ms,
                 latency_p95_ms=row.latency_p95_ms,
+                ttft_p50_ms=row.ttft_p50_ms,
+                ttft_p95_ms=row.ttft_p95_ms,
                 prompt_tokens_sum=row.prompt_tokens_sum,
                 completion_tokens_sum=row.completion_tokens_sum,
                 cost_usd_sum=row.cost_usd_sum,

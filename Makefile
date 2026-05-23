@@ -1,8 +1,14 @@
-.PHONY: up down nuke restart init logs psql redis-cli seed install-dev lint format format-check typecheck test check demo web-rebuild web-restart web-logs web-dev web-dev-stop web-install
+.PHONY: bootstrap up down nuke restart init logs psql redis-cli seed install-dev lint format format-check typecheck test check demo web-rebuild web-restart web-logs web-dev web-dev-stop web-install
+
+# `bootstrap` creates .env from .env.example on first run and fills generated
+# secrets (REDIS_PASSWORD, PRISM_CREDS_KEY). Idempotent — does nothing if .env
+# already exists. Wired into `up` so a fresh clone is one command.
+bootstrap:
+	@python3 scripts/bootstrap_env.py
 
 # `up` builds images and starts containers in the background.
 # Use this after a Dockerfile/lockfile change, or when adding/removing services.
-up:
+up: bootstrap
 	docker compose up -d --build
 
 # `down` stops and removes containers but KEEPS named volumes

@@ -34,7 +34,16 @@ def metadata(
     The chatbot (or any caller) must attach this so prism can correlate the
     captured inference back to a chat message. `extra` ends up verbatim in
     inference_logs.metadata_jsonb.
+
+    Correlation IDs are not strictly validated here (the ingestion API does
+    Pydantic UUID validation and surfaces rejections per-event); non-UUID
+    values get logged at WARNING so misuse is visible without crashing the
+    LLM call.
     """
+    _warn_if_not_uuid("conversation_id", conversation_id)
+    _warn_if_not_uuid("message_id", message_id)
+    if inference_id is not None:
+        _warn_if_not_uuid("inference_id", inference_id)
     prism = {
         "conversation_id": conversation_id,
         "message_id": message_id,
@@ -44,6 +53,17 @@ def metadata(
     if provider is not None:
         prism["provider"] = provider
     return {"prism": prism}
+
+
+def _warn_if_not_uuid(field: str, value: str) -> None:
+    try:
+        uuid.UUID(str(value))
+    except (TypeError, ValueError):
+        log.warning(
+            "prism_sdk.metadata: %s=%r is not a UUID; ingestion will reject this event",
+            field,
+            value,
+        )
 
 
 class PrismClient:
@@ -102,10 +122,17 @@ class PrismClient:
         self.flush()
 
     def flush(self) -> None:
-        batch = self._drain(max_items=100)
-        while batch:
-            self._emit_batch(batch)
+        # When called from close(), _closed is set and _emit_batch drops on
+        # retryable errors instead of requeueing — so the loop terminates even
+        # if ingestion is down. When called from the flusher thread on a live
+        # client, requeues are possible; bound the loop with a max_rounds cap
+        # so a flaky ingestion never wedges a single flush tick.
+        max_rounds = 100
+        for _ in range(max_rounds):
             batch = self._drain(max_items=100)
+            if not batch:
+                return
+            self._emit_batch(batch)
 
     def enqueue(self, event: dict[str, Any]) -> None:
         if self.sink == "noop":
@@ -153,13 +180,40 @@ class PrismClient:
                     headers=headers,
                 )
                 if response.status_code in {429, 503}:
-                    self._requeue(batch)
+                    self._handle_retryable(batch, reason=f"http {response.status_code}")
                 elif response.status_code >= 400:
                     log.warning(
                         "dropping prism batch after ingestion returned %s", response.status_code
                     )
-        except httpx.HTTPError:
-            self._requeue(batch)
+                else:
+                    self._log_partial_rejections(response)
+        except httpx.HTTPError as exc:
+            self._handle_retryable(batch, reason=type(exc).__name__)
+
+    def _handle_retryable(self, batch: list[dict[str, Any]], *, reason: str) -> None:
+        # On shutdown we must not requeue — that would re-grow the queue and
+        # make flush() loop forever. Drop and surface the loss instead.
+        if self._closed.is_set():
+            log.warning(
+                "prism shutdown flush dropping %d events (%s); ingestion unreachable",
+                len(batch),
+                reason,
+            )
+            return
+        self._requeue(batch)
+
+    def _log_partial_rejections(self, response: httpx.Response) -> None:
+        try:
+            payload = response.json()
+        except ValueError:
+            return
+        rejected = payload.get("rejected") if isinstance(payload, dict) else None
+        if isinstance(rejected, list) and rejected:
+            log.warning(
+                "prism ingestion rejected %d events: %s",
+                len(rejected),
+                rejected[:5],
+            )
 
     def _requeue(self, batch: list[dict[str, Any]]) -> None:
         for event in batch:
