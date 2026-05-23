@@ -7,7 +7,7 @@ import { ThemeToggle } from "./theme-toggle";
 const links = [
   { href: "/", label: "Chat" },
   { href: "/metrics", label: "Metrics" },
-  { href: "/dashboards", label: "Dashboards" },
+  // { href: "/dashboards", label: "Dashboards" },
   { href: "/settings", label: "Settings" },
 ];
 
