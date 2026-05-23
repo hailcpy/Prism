@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { TailwindSelect } from "@/lib/tailwind-select";
+
 type Bucket = {
   minute_bucket: string;
   model: string;
@@ -105,6 +107,18 @@ export default function MetricsPage() {
     const fromBuckets = buckets.map((b) => b.provider);
     return Array.from(new Set([...knownProviders, ...fromBuckets])).sort();
   }, [knownProviders, buckets]);
+  const rangeOptions = RANGE_OPTIONS.map((option) => ({
+    value: String(option.minutes),
+    label: option.label,
+  }));
+  const modelOptions = [
+    { value: "", label: "All" },
+    ...models.map((model) => ({ value: model, label: model })),
+  ];
+  const providerOptions = [
+    { value: "", label: "All" },
+    ...providers.map((provider) => ({ value: provider, label: provider })),
+  ];
 
   const seriesByModel = useMemo(() => {
     const grouped: Record<string, Bucket[]> = {};
@@ -159,7 +173,7 @@ export default function MetricsPage() {
 
   return (
     <main className="max-w-6xl mx-auto p-4 md:p-8 space-y-8 min-h-[calc(100vh-56px)] bg-mesh-light dark:bg-mesh-dark text-zinc-900 dark:text-zinc-100">
-      <header className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-8 border-b border-black/10 dark:border-white/10 pb-6">
+      <header className="relative z-30 flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-8 border-b border-black/10 dark:border-white/10 pb-6">
         <div>
           <h1 className="text-3xl font-bold mb-1">Prism — Metrics</h1>
           <div className="text-sm text-zinc-500 dark:text-zinc-400 font-medium">
@@ -175,50 +189,37 @@ export default function MetricsPage() {
           </div>
         </div>
 
-        <div className="flex flex-wrap items-end gap-4 bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md p-4 rounded-xl border border-black/5 dark:border-white/5 shadow-sm">
+        <div className="relative z-30 flex flex-wrap items-end gap-4 bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md p-4 rounded-xl border border-black/5 dark:border-white/5 shadow-sm">
           <label className="flex flex-col gap-1.5 text-xs font-semibold text-zinc-600 dark:text-zinc-400">
             RANGE
-            <select
-              className="px-3 py-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#009f8f]/30 min-w-[140px] text-zinc-900 dark:text-zinc-100"
-              value={rangeMinutes}
-              onChange={(e) => setRangeMinutes(Number(e.target.value))}
-            >
-              {RANGE_OPTIONS.map((option) => (
-                <option key={option.minutes} value={option.minutes}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+            <TailwindSelect
+              value={String(rangeMinutes)}
+              options={rangeOptions}
+              onChange={(value) => setRangeMinutes(Number(value))}
+              ariaLabel="Metrics range"
+              className="min-w-[140px]"
+            />
           </label>
           <label className="flex flex-col gap-1.5 text-xs font-semibold text-zinc-600 dark:text-zinc-400">
             MODEL
-            <select
-              className="px-3 py-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#009f8f]/30 min-w-[140px] text-zinc-900 dark:text-zinc-100"
+            <TailwindSelect
               value={modelFilter}
-              onChange={(e) => setModelFilter(e.target.value)}
-            >
-              <option value="">All</option>
-              {models.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
+              options={modelOptions}
+              onChange={setModelFilter}
+              ariaLabel="Model filter"
+              className="min-w-[140px]"
+              menuClassName="w-72"
+            />
           </label>
           <label className="flex flex-col gap-1.5 text-xs font-semibold text-zinc-600 dark:text-zinc-400">
             PROVIDER
-            <select
-              className="px-3 py-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#009f8f]/30 min-w-[140px] text-zinc-900 dark:text-zinc-100"
+            <TailwindSelect
               value={providerFilter}
-              onChange={(e) => setProviderFilter(e.target.value)}
-            >
-              <option value="">All</option>
-              {providers.map((provider) => (
-                <option key={provider} value={provider}>
-                  {provider}
-                </option>
-              ))}
-            </select>
+              options={providerOptions}
+              onChange={setProviderFilter}
+              ariaLabel="Provider filter"
+              className="min-w-[140px]"
+            />
           </label>
           <button
             type="button"
@@ -524,9 +525,7 @@ function Chart({
                     fill={s.color}
                     className="stroke-white dark:stroke-zinc-900"
                     strokeWidth="1.5"
-                  >
-                    <title>{`${s.key} @ ${new Date(p.x).toLocaleTimeString()}: ${formatY ? formatY(p.y) : formatNumber(p.y)} ${yLabel}`}</title>
-                  </circle>
+                  />
                 ))}
               </g>
             );

@@ -10,9 +10,12 @@ import {
 } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
+  Check,
+  ChevronDown,
   Send,
   RefreshCw,
   MessageSquarePlus,
+  Search,
   Sparkles,
   Square,
   Trash2,
@@ -62,11 +65,14 @@ export default function Home() {
   const [thinkingEffort, setThinkingEffort] = useState<
     "low" | "medium" | "high" | "xhigh" | "max"
   >("medium");
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelQuery, setModelQuery] = useState("");
   const [pendingDelete, setPendingDelete] = useState<Conversation | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const activeConversationIdRef = useRef<string | null>(null);
+  const modelPickerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     activeConversationIdRef.current = conversationId;
@@ -149,6 +155,10 @@ export default function Home() {
   useEffect(() => {
     function onEsc(event: globalThis.KeyboardEvent) {
       if (event.key !== "Escape") return;
+      if (modelMenuOpen) {
+        setModelMenuOpen(false);
+        return;
+      }
       if (pendingDelete) {
         if (!deleteBusy) setPendingDelete(null);
         return;
@@ -157,7 +167,17 @@ export default function Home() {
     }
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [pendingDelete, deleteBusy]);
+  }, [modelMenuOpen, pendingDelete, deleteBusy]);
+
+  useEffect(() => {
+    function onPointerDown(event: PointerEvent) {
+      if (!modelPickerRef.current?.contains(event.target as Node)) {
+        setModelMenuOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, []);
 
   async function startNewChat() {
     abortRef.current?.abort();
@@ -366,7 +386,9 @@ export default function Home() {
     }
   }
 
-  function updatePendingAssistant(update: (message: ChatMessage) => ChatMessage) {
+  function updatePendingAssistant(
+    update: (message: ChatMessage) => ChatMessage,
+  ) {
     setMessages((current) => {
       const next = [...current];
       const last = next[next.length - 1];
@@ -406,10 +428,20 @@ export default function Home() {
   }
 
   const selected = models.find((m) => m.id === model) ?? fallbackModel;
+  const availableModels = models.length > 0 ? models : [fallbackModel];
+  const filteredModels = availableModels.filter((item) => {
+    const query = modelQuery.trim().toLowerCase();
+    if (!query) return true;
+    return (
+      item.id.toLowerCase().includes(query) ||
+      item.label.toLowerCase().includes(query) ||
+      item.provider.toLowerCase().includes(query)
+    );
+  });
   const activeConversation = conversations.find((c) => c.id === conversationId);
   const activeTitle = activeConversation?.title ?? "Chat";
   const providerGroups = Array.from(
-    models.reduce((groups, item) => {
+    filteredModels.reduce((groups, item) => {
       const list = groups.get(item.provider) ?? [];
       list.push(item);
       groups.set(item.provider, list);
@@ -446,7 +478,6 @@ export default function Home() {
               <button
                 type="button"
                 className="w-full text-left p-3 pr-10"
-                title={c.title ?? c.model_default}
                 onClick={() => {
                   if (c.id !== conversationId) abortRef.current?.abort();
                   setConversationId(c.id);
@@ -461,10 +492,19 @@ export default function Home() {
                   {c.message_count} messages
                 </span>
               </button>
+              <div className="pointer-events-none absolute left-2 right-9 top-2 z-20 rounded-md border border-black/10 bg-white px-2.5 py-2 text-xs font-semibold text-zinc-800 opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-100">
+                <span className="block break-words">
+                  {c.title ?? c.model_default}
+                </span>
+                {c.title && (
+                  <span className="mt-1 block break-words font-normal text-zinc-500 dark:text-zinc-400">
+                    {c.model_default}
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
                 aria-label="Delete conversation"
-                title="Delete conversation"
                 onClick={(e) => {
                   e.stopPropagation();
                   setPendingDelete(c);
@@ -484,9 +524,7 @@ export default function Home() {
         <header className="flex items-center justify-between gap-4 p-4 md:px-8 border-b border-black/5 dark:border-white/5 bg-white/40 dark:bg-zinc-900/40 backdrop-blur-xl shrink-0">
           <div>
             <h2 className="text-lg font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
-              <span className="truncate max-w-[48vw]" title={activeTitle}>
-                {activeTitle}
-              </span>
+              <span className="truncate max-w-[48vw]">{activeTitle}</span>
               {selected.thinking_supported && (
                 <Sparkles className="w-4 h-4 text-[#2453ff] dark:text-[#ff6d4d]" />
               )}
@@ -502,14 +540,15 @@ export default function Home() {
             {cost && cost.calls > 0 && (
               <span
                 className="text-xs font-semibold px-2.5 py-1 rounded-full border border-[#009f8f]/30 bg-[#009f8f]/10 text-zinc-700 dark:text-zinc-200"
-                title={`prompt ${cost.prompt_tokens.toLocaleString()} · completion ${cost.completion_tokens.toLocaleString()} · cached ${cost.cached_prompt_tokens.toLocaleString()} · reasoning ${cost.reasoning_tokens.toLocaleString()} · ${cost.calls} call${cost.calls === 1 ? "" : "s"}`}
+                aria-label={`prompt ${cost.prompt_tokens.toLocaleString()}, completion ${cost.completion_tokens.toLocaleString()}, cached ${cost.cached_prompt_tokens.toLocaleString()}, reasoning ${cost.reasoning_tokens.toLocaleString()}, ${cost.calls} call${cost.calls === 1 ? "" : "s"}`}
               >
                 {formatCostShort(cost.cost_usd)} ·{" "}
                 {formatTokens(
                   cost.prompt_tokens +
                     cost.completion_tokens +
                     cost.reasoning_tokens,
-                )} tok
+                )}{" "}
+                tok
               </span>
             )}
             {modelStatus && (
@@ -521,7 +560,7 @@ export default function Home() {
               type="button"
               className="p-2 rounded-lg border border-black/10 dark:border-white/10 bg-white/50 dark:bg-zinc-800/50 hover:bg-white dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 transition-colors"
               onClick={() => void loadModels()}
-              title="Refresh models"
+              aria-label="Refresh models"
             >
               <RefreshCw className="w-4 h-4" />
             </button>
@@ -618,31 +657,88 @@ export default function Home() {
             onSubmit={send}
           >
             <div className="flex items-center gap-2 px-1 mb-1 relative border-b border-black/5 dark:border-white/5 pb-2">
-              <Sparkles className="w-3.5 h-3.5 text-zinc-400" />
-              <select
-                className="bg-transparent appearance-none hover:bg-black/5 dark:hover:bg-white/5 px-2 py-0.5 rounded text-xs font-semibold text-zinc-700 dark:text-zinc-300 outline-none cursor-pointer max-w-full transition-colors"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                aria-label="Model"
-                style={{ WebkitAppearance: "none", MozAppearance: "none" }}
-              >
-                {providerGroups.length === 0 ? (
-                  <option value={fallbackModel.id}>
-                    {fallbackModel.label}
-                  </option>
-                ) : (
-                  providerGroups.map(([provider, items]) => (
-                    <optgroup key={provider} label={provider}>
-                      {items.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.label}
-                          {item.source === "fallback" ? " (fallback)" : ""}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))
+              <div className="relative min-w-0 flex-1" ref={modelPickerRef}>
+                <button
+                  type="button"
+                  className="flex max-w-full items-center gap-1.5 rounded px-2 py-0.5 text-left text-xs font-semibold text-zinc-700 outline-none transition-colors hover:bg-black/5 focus-visible:ring-2 focus-visible:ring-[#009f8f]/30 dark:text-zinc-300 dark:hover:bg-white/5"
+                  aria-haspopup="listbox"
+                  aria-expanded={modelMenuOpen}
+                  onClick={() => {
+                    setModelMenuOpen((open) => !open);
+                    setModelQuery("");
+                  }}
+                >
+                  <Sparkles className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                  <span className="truncate">{selected.label}</span>
+                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                </button>
+
+                {modelMenuOpen && (
+                  <div className="absolute bottom-full left-0 z-40 mb-2 w-[min(24rem,calc(100vw-3rem))] overflow-hidden rounded-lg border border-black/10 bg-white shadow-2xl dark:border-white/10 dark:bg-zinc-900">
+                    <div className="flex items-center gap-2 border-b border-black/5 px-3 py-2 dark:border-white/10">
+                      <Search className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                      <input
+                        value={modelQuery}
+                        onChange={(e) => setModelQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.preventDefault();
+                        }}
+                        className="min-w-0 flex-1 bg-transparent text-xs font-medium text-zinc-800 outline-none placeholder:text-zinc-400 dark:text-zinc-100"
+                        placeholder="Filter models"
+                        autoFocus
+                      />
+                    </div>
+                    <div
+                      role="listbox"
+                      aria-label="Model"
+                      className="max-h-72 overflow-y-auto p-1.5"
+                    >
+                      {providerGroups.length === 0 ? (
+                        <div className="px-2 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400">
+                          No models match
+                        </div>
+                      ) : (
+                        providerGroups.map(([provider, items]) => (
+                          <div key={provider} className="py-1">
+                            <div className="px-2 pb-1 text-[10px] font-bold uppercase text-zinc-400">
+                              {provider}
+                            </div>
+                            {items.map((item) => (
+                              <button
+                                key={item.id}
+                                type="button"
+                                role="option"
+                                aria-selected={item.id === model}
+                                className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                                onClick={() => {
+                                  setModel(item.id);
+                                  setModelMenuOpen(false);
+                                  setModelQuery("");
+                                }}
+                              >
+                                <span className="min-w-0 flex-1">
+                                  <span className="block truncate font-semibold">
+                                    {item.label}
+                                  </span>
+                                  <span className="block truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                                    {item.id}
+                                    {item.source === "fallback"
+                                      ? " · fallback"
+                                      : ""}
+                                  </span>
+                                </span>
+                                {item.id === model && (
+                                  <Check className="h-3.5 w-3.5 shrink-0 text-[#009f8f]" />
+                                )}
+                              </button>
+                            ))}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
                 )}
-              </select>
+              </div>
               {selected.thinking_supported && (
                 <div className="ml-auto flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
                   <label className="flex items-center gap-1.5 cursor-pointer select-none">
@@ -872,9 +968,7 @@ function ToolCallPanel({ toolCall }: { toolCall: ToolCall }) {
 function parseToolCall(data: Record<string, unknown>): ToolCall | null {
   const name = typeof data.name === "string" ? data.name : "unknown";
   const id =
-    typeof data.id === "string" && data.id
-      ? data.id
-      : `${name}-${Date.now()}`;
+    typeof data.id === "string" && data.id ? data.id : `${name}-${Date.now()}`;
   const rawStatus = typeof data.status === "string" ? data.status : "running";
   const status =
     rawStatus === "ok" || rawStatus === "error" ? rawStatus : "running";
@@ -900,8 +994,7 @@ function mergeToolCall(toolCalls: ToolCall[], next: ToolCall): ToolCall[] {
           ...item,
           ...next,
           name: next.name === "unknown" ? item.name : next.name,
-          arguments_preview:
-            next.arguments_preview ?? item.arguments_preview,
+          arguments_preview: next.arguments_preview ?? item.arguments_preview,
           result_preview: next.result_preview ?? item.result_preview,
         }
       : item,

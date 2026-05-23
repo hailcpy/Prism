@@ -6,6 +6,8 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { LayoutItem } from "react-grid-layout/legacy";
 
+import { TailwindSelect } from "@/lib/tailwind-select";
+
 import {
   type DashboardBody,
   type DashboardData,
@@ -220,10 +222,14 @@ export default function DashboardEditorPage() {
     minW: 2,
     minH: 1,
   }));
+  const rangeOptions = RANGE_OPTIONS.map((option) => ({
+    value: String(option.minutes),
+    label: option.label,
+  }));
 
   return (
     <main className="min-h-[calc(100vh-56px)] bg-mesh-light dark:bg-mesh-dark flex flex-col text-zinc-900 dark:text-zinc-100">
-      <header className="p-4 md:px-8 border-b border-black/10 dark:border-white/10 bg-white/40 dark:bg-zinc-900/40 backdrop-blur-md flex flex-col md:flex-row justify-between items-start md:items-center gap-4 sticky top-0 z-10">
+      <header className="p-4 md:px-8 border-b border-black/10 dark:border-white/10 bg-white/40 dark:bg-zinc-900/40 backdrop-blur-md flex flex-col md:flex-row justify-between items-start md:items-center gap-4 sticky top-0 z-50">
         <div className="flex items-center gap-4 flex-1 w-full max-w-2xl">
           <Link
             href="/dashboards"
@@ -243,17 +249,13 @@ export default function DashboardEditorPage() {
         <div className="flex items-center gap-3 w-full md:w-auto overflow-x-auto pb-1 md:pb-0">
           <label className="flex items-center gap-2 text-xs font-semibold text-zinc-600 dark:text-zinc-400 shrink-0">
             RANGE
-            <select
-              className="px-3 py-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#009f8f]/30 text-zinc-900 dark:text-zinc-100"
-              value={rangeMinutes}
-              onChange={(e) => setRangeMinutes(Number(e.target.value))}
-            >
-              {RANGE_OPTIONS.map((opt) => (
-                <option key={opt.minutes} value={opt.minutes}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+            <TailwindSelect
+              value={String(rangeMinutes)}
+              options={rangeOptions}
+              onChange={(value) => setRangeMinutes(Number(value))}
+              ariaLabel="Dashboard range"
+              className="w-36"
+            />
           </label>
           <button
             type="button"
@@ -359,7 +361,7 @@ function CellView({ cell, result, onRemove, onTitleChange }: CellViewProps) {
             onClick={onRemove}
             onMouseDown={(e) => e.stopPropagation()}
             className="w-6 h-6 flex items-center justify-center rounded text-[16px] leading-none text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 ml-2"
-            title="Remove Widget"
+            aria-label="Remove widget"
           >
             ×
           </button>

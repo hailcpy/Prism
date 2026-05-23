@@ -11,6 +11,7 @@ import {
   upsertCredential,
   validateCredential,
 } from "@/lib/api";
+import { TailwindSelect } from "@/lib/tailwind-select";
 
 type FieldState = Record<string, string>;
 
@@ -153,6 +154,10 @@ export default function SettingsPage() {
     }
     return Array.from(map.entries());
   }, [credentials]);
+  const providerOptions = providers.map((provider) => ({
+    value: provider.id,
+    label: provider.label,
+  }));
 
   return (
     <main className="max-w-4xl mx-auto p-8 space-y-8 min-h-[calc(100vh-56px)] bg-mesh-light dark:bg-mesh-dark text-zinc-900 dark:text-zinc-100">
@@ -175,17 +180,12 @@ export default function SettingsPage() {
         >
           <div className="flex flex-col gap-1">
             <label className="text-sm font-semibold">Provider</label>
-            <select
-              className="px-3 py-2 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-800 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#009f8f]/30"
+            <TailwindSelect
               value={providerId}
-              onChange={(e) => onProviderChange(e.target.value)}
-            >
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
+              options={providerOptions}
+              onChange={onProviderChange}
+              ariaLabel="Provider"
+            />
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-sm font-semibold">Name</label>
