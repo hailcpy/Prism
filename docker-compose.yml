@@ -51,6 +51,18 @@ services:
       context: .
       dockerfile: services/chatbot-api/Dockerfile
     env_file: .env
+    command:
+      - "uvicorn"
+      - "chatbot_api.main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--reload"
+      - "--reload-dir"
+      - "/app/services"
+      - "--reload-dir"
+      - "/app/infra"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-prism}:${POSTGRES_PASSWORD:-prism}@postgres:5432/${POSTGRES_DB:-prism}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -80,6 +92,18 @@ services:
       context: .
       dockerfile: services/ingestion-api/Dockerfile
     env_file: .env
+    command:
+      - "uvicorn"
+      - "ingestion_api.main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8001"
+      - "--reload"
+      - "--reload-dir"
+      - "/app/services"
+      - "--reload-dir"
+      - "/app/infra"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-prism}:${POSTGRES_PASSWORD:-prism}@postgres:5432/${POSTGRES_DB:-prism}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -106,7 +130,7 @@ services:
     build:
       context: .
       dockerfile: services/workers/Dockerfile
-    command: ["python", "-m", "log_writer.main"]
+    command: ["watchfiles", "--filter", "python", "python -m log_writer.main", "/app/services/workers/log_writer", "/app/infra"]
     env_file: .env
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-prism}:${POSTGRES_PASSWORD:-prism}@postgres:5432/${POSTGRES_DB:-prism}
@@ -125,7 +149,7 @@ services:
     build:
       context: .
       dockerfile: services/workers/Dockerfile
-    command: ["python", "-m", "metrics_roller.main"]
+    command: ["watchfiles", "--filter", "python", "python -m metrics_roller.main", "/app/services/workers/metrics_roller", "/app/infra"]
     env_file: .env
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-prism}:${POSTGRES_PASSWORD:-prism}@postgres:5432/${POSTGRES_DB:-prism}
@@ -144,7 +168,7 @@ services:
     build:
       context: .
       dockerfile: services/workers/Dockerfile
-    command: ["python", "-m", "metrics_reconciler.main"]
+    command: ["watchfiles", "--filter", "python", "python -m metrics_reconciler.main", "/app/services/workers/metrics_reconciler", "/app/infra"]
     env_file: .env
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-prism}:${POSTGRES_PASSWORD:-prism}@postgres:5432/${POSTGRES_DB:-prism}
@@ -160,7 +184,7 @@ services:
     build:
       context: .
       dockerfile: services/workers/Dockerfile
-    command: ["python", "-m", "partition_cron.main"]
+    command: ["watchfiles", "--filter", "python", "python -m partition_cron.main", "/app/services/workers/partition_cron", "/app/infra"]
     env_file: .env
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-prism}:${POSTGRES_PASSWORD:-prism}@postgres:5432/${POSTGRES_DB:-prism}
@@ -182,6 +206,12 @@ services:
       - "3001:3000"
     environment:
       NEXT_PUBLIC_CHATBOT_API_URL: http://localhost:8100
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./web:/app
+      - chatbot-ui-node-modules:/app/node_modules
+      - chatbot-ui-next-cache:/app/.next
     depends_on:
       - chatbot-api
     healthcheck:
@@ -194,3 +224,5 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  chatbot-ui-node-modules:
+  chatbot-ui-next-cache:

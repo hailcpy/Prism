@@ -1,4 +1,4 @@
-.PHONY: up down nuke restart init logs psql redis-cli seed install-dev lint format format-check typecheck test check demo web-rebuild web-restart web-logs web-dev web-install
+.PHONY: up down nuke restart init logs psql redis-cli seed install-dev lint format format-check typecheck test check demo web-rebuild web-restart web-logs web-dev web-dev-stop web-install
 
 # `up` builds images and starts containers in the background.
 # Use this after a Dockerfile/lockfile change, or when adding/removing services.
@@ -8,7 +8,15 @@ up:
 # `down` stops and removes containers but KEEPS named volumes
 # (postgres-data, redis-data). Your data survives.
 down:
-	docker compose down
+	docker compose down --remove-orphans
+	@$(MAKE) --no-print-directory web-dev-stop
+
+web-dev-stop:
+	@pid=$$(lsof -ti tcp:3000); \
+	if [ -n "$$pid" ]; then \
+	  echo "Killing local next dev on :3000 (pid $$pid)"; \
+	  kill $$pid 2>/dev/null || true; \
+	fi
 
 # `nuke` ALSO deletes named volumes — postgres + redis data is gone.
 # Requires explicit confirmation. Use this only when you want a clean slate.

@@ -1308,10 +1308,14 @@ version = "0.1.0"
 source = { editable = "services/workers" }
 dependencies = [
     { name = "prism-infra" },
+    { name = "watchfiles" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "prism-infra", editable = "infra" }]
+requires-dist = [
+    { name = "prism-infra", editable = "infra" },
+    { name = "watchfiles", specifier = ">=0.21" },
+]
 
 [[package]]
 name = "propcache"
