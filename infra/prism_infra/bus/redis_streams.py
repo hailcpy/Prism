@@ -8,13 +8,25 @@ from redis.exceptions import ResponseError
 
 from prism_infra.bus.base import StreamMessage
 
+DEFAULT_STREAM_MAXLEN = 1_000_000
+
 
 class RedisStreamsBus:
-    def __init__(self, redis_url: str) -> None:
+    def __init__(self, redis_url: str, *, maxlen: int = DEFAULT_STREAM_MAXLEN) -> None:
         self.client = redis.Redis.from_url(redis_url, decode_responses=True)
+        # Approximate trim caps memory growth if a worker is down for hours; ~ means
+        # Redis trims in O(1) at radix-tree node boundaries (slightly over maxlen).
+        self.maxlen = maxlen
 
     def publish(self, stream: str, event: dict[str, Any]) -> str:
-        return str(self.client.xadd(stream, {"event": json.dumps(event, separators=(",", ":"))}))
+        return str(
+            self.client.xadd(
+                stream,
+                {"event": json.dumps(event, separators=(",", ":"))},
+                maxlen=self.maxlen,
+                approximate=True,
+            )
+        )
 
     def consume(
         self,
