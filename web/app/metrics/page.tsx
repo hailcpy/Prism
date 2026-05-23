@@ -10,6 +10,8 @@ type Bucket = {
   error_count: number;
   latency_p50_ms: number;
   latency_p95_ms: number;
+  ttft_p50_ms: number | null;
+  ttft_p95_ms: number | null;
   prompt_tokens_sum: number;
   completion_tokens_sum: number;
   cost_usd_sum: number;
@@ -256,13 +258,23 @@ export default function MetricsPage() {
           formatY={(v) => formatCost(v)}
         />
         <Chart
-          title="Latency p50"
+          title="Total latency p50 (request → final token)"
           series={buildSeries((b) => b.latency_p50_ms)}
           yLabel="ms"
         />
         <Chart
-          title="Latency p95"
+          title="Total latency p95 (request → final token)"
           series={buildSeries((b) => b.latency_p95_ms)}
+          yLabel="ms"
+        />
+        <Chart
+          title="TTFT p50 (request → first token)"
+          series={buildSeries((b) => b.ttft_p50_ms ?? 0)}
+          yLabel="ms"
+        />
+        <Chart
+          title="TTFT p95 (request → first token)"
+          series={buildSeries((b) => b.ttft_p95_ms ?? 0)}
           yLabel="ms"
         />
         <Chart

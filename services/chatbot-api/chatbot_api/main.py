@@ -897,6 +897,8 @@ class MetricsBucket(BaseModel):
     error_count: int
     latency_p50_ms: int
     latency_p95_ms: int
+    ttft_p50_ms: int | None = None
+    ttft_p95_ms: int | None = None
     prompt_tokens_sum: int
     completion_tokens_sum: int
     cost_usd_sum: float = 0.0
@@ -956,6 +958,8 @@ def get_metrics(
                 error_count=row.error_count,
                 latency_p50_ms=row.latency_p50_ms,
                 latency_p95_ms=row.latency_p95_ms,
+                ttft_p50_ms=row.ttft_p50_ms,
+                ttft_p95_ms=row.ttft_p95_ms,
                 prompt_tokens_sum=row.prompt_tokens_sum,
                 completion_tokens_sum=row.completion_tokens_sum,
                 cost_usd_sum=row.cost_usd_sum,
