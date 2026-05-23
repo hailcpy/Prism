@@ -16,6 +16,7 @@ import {
   Sparkles,
   Square,
   Trash2,
+  Wrench,
 } from "lucide-react";
 
 import {
@@ -23,6 +24,7 @@ import {
   ConversationCost,
   Message,
   ModelOption,
+  ToolCall,
   apiUrl,
   createConversation,
   deleteConversation,
@@ -41,10 +43,14 @@ const fallbackModel: ModelOption = {
   thinking_supported: false,
 };
 
+type ChatMessage = Message & {
+  tool_calls?: ToolCall[];
+};
+
 export default function Home() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [model, setModel] = useState<string>(fallbackModel.id);
   const [draft, setDraft] = useState("");
@@ -187,8 +193,17 @@ export default function Home() {
     let activeId = conversationId;
     if (!activeId) {
       try {
-        activeId = await createConversation(model);
+        const createdId = await createConversation(model);
+        activeId = createdId;
         setConversationId(activeId);
+        setConversations((current) => [
+          {
+            id: createdId,
+            model_default: model,
+            message_count: 0,
+          },
+          ...current,
+        ]);
       } catch (e) {
         setStatus(
           e instanceof Error ? e.message : "failed to create conversation",
@@ -258,45 +273,60 @@ export default function Home() {
           });
         } else if (name === "token") {
           const delta = String(data.delta ?? "");
-          setMessages((current) => {
-            const next = [...current];
-            const last = next[next.length - 1];
-            if (last?.role === "assistant" && last.status === "pending") {
-              next[next.length - 1] = {
-                ...last,
-                content: last.content + delta,
-              };
-            } else {
-              next.push({
-                id: `local-${Date.now()}`,
-                role: "assistant",
-                status: "pending",
-                content: delta,
-                created_at: new Date().toISOString(),
-              });
-            }
-            return next;
-          });
+          updatePendingAssistant((message) => ({
+            ...message,
+            content: message.content + delta,
+          }));
+        } else if (name === "thinking") {
+          const delta = String(data.delta ?? "");
+          if (delta) {
+            updatePendingAssistant((message) => ({
+              ...message,
+              thinking_trace: `${message.thinking_trace ?? ""}${delta}`,
+            }));
+          }
+        } else if (name === "tool_call") {
+          const toolCall = parseToolCall(data);
+          if (toolCall) {
+            updatePendingAssistant((message) => ({
+              ...message,
+              tool_calls: mergeToolCall(message.tool_calls ?? [], toolCall),
+            }));
+          }
         } else if (name === "title") {
           const title = typeof data.title === "string" ? data.title : null;
           if (title && activeId) {
             setConversations((current) =>
-              current.map((c) => (c.id === activeId ? { ...c, title } : c)),
+              current.some((c) => c.id === activeId)
+                ? current.map((c) => (c.id === activeId ? { ...c, title } : c))
+                : [
+                    {
+                      id: activeId,
+                      model_default: model,
+                      message_count: 0,
+                      title,
+                    },
+                    ...current,
+                  ],
             );
           }
         } else if (name === "done") {
-          await getMessages(activeId).then(setMessages);
+          const loaded = await getMessages(activeId);
+          setMessages((current) => mergeLoadedMessages(loaded, current));
         } else if (name === "error") {
           const detail = data.error as { message?: string } | undefined;
           setStatus(detail?.message ?? "stream error");
         }
       }
-      await getMessages(activeId).then(setMessages);
+      const loaded = await getMessages(activeId);
+      setMessages((current) => mergeLoadedMessages(loaded, current));
       await loadConversations();
       await refreshCost(activeId);
     } catch (e) {
       if ((e as Error).name !== "AbortError") {
         setStatus(e instanceof Error ? e.message : "send failed");
+      } else if (activeId) {
+        await refreshAfterInterruptedStream(activeId);
       }
     } finally {
       setBusy(false);
@@ -311,7 +341,48 @@ export default function Home() {
     }
   }
 
+  function updatePendingAssistant(update: (message: ChatMessage) => ChatMessage) {
+    setMessages((current) => {
+      const next = [...current];
+      const last = next[next.length - 1];
+      if (last?.role === "assistant" && last.status === "pending") {
+        next[next.length - 1] = update(last);
+      } else {
+        next.push(
+          update({
+            id: `local-${Date.now()}`,
+            role: "assistant",
+            status: "pending",
+            content: "",
+            created_at: new Date().toISOString(),
+          }),
+        );
+      }
+      return next;
+    });
+  }
+
+  async function refreshAfterInterruptedStream(id: string) {
+    await wait(300);
+    try {
+      const loaded = await getMessages(id);
+      setMessages((current) => mergeLoadedMessages(loaded, current));
+      await loadConversations();
+      await refreshCost(id);
+      await wait(900);
+      await refreshCost(id);
+    } catch (refreshError) {
+      setStatus(
+        refreshError instanceof Error
+          ? refreshError.message
+          : "failed to refresh cancelled stream",
+      );
+    }
+  }
+
   const selected = models.find((m) => m.id === model) ?? fallbackModel;
+  const activeConversation = conversations.find((c) => c.id === conversationId);
+  const activeTitle = activeConversation?.title ?? "Chat";
   const providerGroups = Array.from(
     models.reduce((groups, item) => {
       const list = groups.get(item.provider) ?? [];
@@ -350,6 +421,7 @@ export default function Home() {
               <button
                 type="button"
                 className="w-full text-left p-3 pr-10"
+                title={c.title ?? c.model_default}
                 onClick={() => {
                   setConversationId(c.id);
                   setModel(c.model_default);
@@ -386,7 +458,9 @@ export default function Home() {
         <header className="flex items-center justify-between gap-4 p-4 md:px-8 border-b border-black/5 dark:border-white/5 bg-white/40 dark:bg-zinc-900/40 backdrop-blur-xl shrink-0">
           <div>
             <h2 className="text-lg font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
-              Chat
+              <span className="truncate max-w-[48vw]" title={activeTitle}>
+                {activeTitle}
+              </span>
               {selected.thinking_supported && (
                 <Sparkles className="w-4 h-4 text-[#2453ff] dark:text-[#ff6d4d]" />
               )}
@@ -405,7 +479,11 @@ export default function Home() {
                 title={`prompt ${cost.prompt_tokens.toLocaleString()} · completion ${cost.completion_tokens.toLocaleString()} · cached ${cost.cached_prompt_tokens.toLocaleString()} · reasoning ${cost.reasoning_tokens.toLocaleString()} · ${cost.calls} call${cost.calls === 1 ? "" : "s"}`}
               >
                 {formatCostShort(cost.cost_usd)} ·{" "}
-                {formatTokens(cost.prompt_tokens + cost.completion_tokens)} tok
+                {formatTokens(
+                  cost.prompt_tokens +
+                    cost.completion_tokens +
+                    cost.reasoning_tokens,
+                )} tok
               </span>
             )}
             {modelStatus && (
@@ -457,15 +535,24 @@ export default function Home() {
                       {m.role}
                     </div>
 
-                    {m.thinking_trace && (
-                      <details className="mb-2 w-full max-w-full border border-[#2453ff]/10 dark:border-[#2453ff]/20 rounded-xl bg-[#2453ff]/5 dark:bg-[#2453ff]/10 text-zinc-800 dark:text-zinc-200 text-sm overflow-hidden group">
-                        <summary className="cursor-pointer px-4 py-2.5 font-semibold hover:bg-black/5 dark:hover:bg-white/5 transition-colors select-none">
-                          Thinking trace
-                        </summary>
-                        <div className="px-4 py-3 border-t border-[#2453ff]/5 dark:border-[#2453ff]/10 whitespace-pre-wrap font-mono text-xs opacity-90 leading-relaxed">
-                          {m.thinking_trace}
-                        </div>
-                      </details>
+                    {m.role === "assistant" &&
+                      (m.thinking_trace ||
+                        (m.status === "pending" && !m.content)) && (
+                        <ThinkingTracePanel
+                          trace={m.thinking_trace ?? ""}
+                          pending={m.status === "pending" && !m.content}
+                        />
+                      )}
+
+                    {m.tool_calls && m.tool_calls.length > 0 && (
+                      <div className="mb-2 w-full max-w-full space-y-1.5">
+                        {m.tool_calls.map((toolCall) => (
+                          <ToolCallPanel
+                            key={toolCall.id}
+                            toolCall={toolCall}
+                          />
+                        ))}
+                      </div>
                     )}
 
                     <div
@@ -695,6 +782,123 @@ function TypingDots() {
       ))}
     </span>
   );
+}
+
+function ThinkingTracePanel({
+  trace,
+  pending,
+}: {
+  trace: string;
+  pending: boolean;
+}) {
+  return (
+    <div className="mb-2 w-full max-w-full border-l-2 border-zinc-300 dark:border-zinc-700 pl-3 py-1 text-zinc-500 dark:text-zinc-400">
+      <div className="text-[11px] font-semibold uppercase text-zinc-400 dark:text-zinc-500 mb-1">
+        Thinking
+      </div>
+      {trace ? (
+        <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
+          {trace}
+        </div>
+      ) : pending ? (
+        <div className="text-sm italic">Thinking...</div>
+      ) : null}
+    </div>
+  );
+}
+
+function ToolCallPanel({ toolCall }: { toolCall: ToolCall }) {
+  const statusLabel =
+    toolCall.status === "running"
+      ? "Running"
+      : toolCall.status === "error"
+        ? "Error"
+        : "Done";
+  return (
+    <div className="w-full max-w-full rounded-xl border border-[#009f8f]/15 dark:border-[#009f8f]/25 bg-[#009f8f]/5 dark:bg-[#009f8f]/10 px-4 py-2.5 text-sm text-zinc-800 dark:text-zinc-200">
+      <div className="flex items-center gap-2 min-w-0">
+        <Wrench className="w-3.5 h-3.5 shrink-0 text-[#009f8f]" />
+        <span className="font-semibold truncate">{toolCall.name}</span>
+        <span
+          className={`ml-auto shrink-0 text-[11px] font-semibold uppercase ${
+            toolCall.status === "error"
+              ? "text-[#ff6d4d]"
+              : "text-zinc-500 dark:text-zinc-400"
+          }`}
+        >
+          {statusLabel}
+        </span>
+      </div>
+      {toolCall.arguments_preview && (
+        <div className="mt-2 font-mono text-xs whitespace-pre-wrap break-words text-zinc-600 dark:text-zinc-300">
+          {toolCall.arguments_preview}
+        </div>
+      )}
+      {toolCall.result_preview && (
+        <div className="mt-2 border-t border-black/5 dark:border-white/10 pt-2 text-xs whitespace-pre-wrap break-words text-zinc-600 dark:text-zinc-300">
+          {toolCall.result_preview}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function parseToolCall(data: Record<string, unknown>): ToolCall | null {
+  const name = typeof data.name === "string" ? data.name : "unknown";
+  const id =
+    typeof data.id === "string" && data.id
+      ? data.id
+      : `${name}-${Date.now()}`;
+  const rawStatus = typeof data.status === "string" ? data.status : "running";
+  const status =
+    rawStatus === "ok" || rawStatus === "error" ? rawStatus : "running";
+  return {
+    id,
+    name,
+    status,
+    arguments_preview:
+      typeof data.arguments_preview === "string"
+        ? data.arguments_preview
+        : undefined,
+    result_preview:
+      typeof data.result_preview === "string" ? data.result_preview : undefined,
+  };
+}
+
+function mergeToolCall(toolCalls: ToolCall[], next: ToolCall): ToolCall[] {
+  const existingIndex = toolCalls.findIndex((item) => item.id === next.id);
+  if (existingIndex === -1) return [...toolCalls, next];
+  return toolCalls.map((item, index) =>
+    index === existingIndex
+      ? {
+          ...item,
+          ...next,
+          name: next.name === "unknown" ? item.name : next.name,
+          arguments_preview:
+            next.arguments_preview ?? item.arguments_preview,
+          result_preview: next.result_preview ?? item.result_preview,
+        }
+      : item,
+  );
+}
+
+function mergeLoadedMessages(
+  loaded: Message[],
+  current: ChatMessage[],
+): ChatMessage[] {
+  const currentById = new Map(current.map((message) => [message.id, message]));
+  return loaded.map((message) => {
+    const existing = currentById.get(message.id);
+    return {
+      ...message,
+      thinking_trace: message.thinking_trace ?? existing?.thinking_trace,
+      tool_calls: existing?.tool_calls,
+    };
+  });
+}
+
+async function wait(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function formatCostShort(v: number): string {
