@@ -122,10 +122,17 @@ class PrismClient:
         self.flush()
 
     def flush(self) -> None:
-        batch = self._drain(max_items=100)
-        while batch:
-            self._emit_batch(batch)
+        # When called from close(), _closed is set and _emit_batch drops on
+        # retryable errors instead of requeueing — so the loop terminates even
+        # if ingestion is down. When called from the flusher thread on a live
+        # client, requeues are possible; bound the loop with a max_rounds cap
+        # so a flaky ingestion never wedges a single flush tick.
+        max_rounds = 100
+        for _ in range(max_rounds):
             batch = self._drain(max_items=100)
+            if not batch:
+                return
+            self._emit_batch(batch)
 
     def enqueue(self, event: dict[str, Any]) -> None:
         if self.sink == "noop":
@@ -173,15 +180,27 @@ class PrismClient:
                     headers=headers,
                 )
                 if response.status_code in {429, 503}:
-                    self._requeue(batch)
+                    self._handle_retryable(batch, reason=f"http {response.status_code}")
                 elif response.status_code >= 400:
                     log.warning(
                         "dropping prism batch after ingestion returned %s", response.status_code
                     )
                 else:
                     self._log_partial_rejections(response)
-        except httpx.HTTPError:
-            self._requeue(batch)
+        except httpx.HTTPError as exc:
+            self._handle_retryable(batch, reason=type(exc).__name__)
+
+    def _handle_retryable(self, batch: list[dict[str, Any]], *, reason: str) -> None:
+        # On shutdown we must not requeue — that would re-grow the queue and
+        # make flush() loop forever. Drop and surface the loss instead.
+        if self._closed.is_set():
+            log.warning(
+                "prism shutdown flush dropping %d events (%s); ingestion unreachable",
+                len(batch),
+                reason,
+            )
+            return
+        self._requeue(batch)
 
     def _log_partial_rejections(self, response: httpx.Response) -> None:
         try:
