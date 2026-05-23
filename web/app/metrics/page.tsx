@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Bucket = {
   minute_bucket: string;
@@ -141,15 +141,17 @@ export default function MetricsPage() {
   }, [buckets]);
 
   const buildSeries = useCallback(
-    (extract: (b: Bucket) => number): Series[] => {
+    (extract: (b: Bucket) => number | null): Series[] => {
       const entries = Object.entries(seriesByModel);
       return entries.map(([model, list], idx) => ({
         key: model,
         color: SERIES_COLORS[idx % SERIES_COLORS.length],
-        points: list.map((b) => ({
-          x: new Date(b.minute_bucket).getTime(),
-          y: extract(b),
-        })),
+        points: list.flatMap((b) => {
+          const value = extract(b);
+          return value === null
+            ? []
+            : [{ x: new Date(b.minute_bucket).getTime(), y: value }];
+        }),
       }));
     },
     [seriesByModel],
@@ -269,12 +271,12 @@ export default function MetricsPage() {
         />
         <Chart
           title="TTFT p50 (request → first token)"
-          series={buildSeries((b) => b.ttft_p50_ms ?? 0)}
+          series={buildSeries((b) => b.ttft_p50_ms)}
           yLabel="ms"
         />
         <Chart
           title="TTFT p95 (request → first token)"
-          series={buildSeries((b) => b.ttft_p95_ms ?? 0)}
+          series={buildSeries((b) => b.ttft_p95_ms)}
           yLabel="ms"
         />
         <Chart
@@ -352,7 +354,9 @@ function Chart({
   yLabel: string;
   formatY?: (v: number) => string;
 }) {
-  const allPoints = series.flatMap((s) => s.points);
+  const allPoints = series.flatMap((s) =>
+    s.points.map((p) => ({ ...p, key: s.key, color: s.color })),
+  );
   const empty = allPoints.length === 0;
 
   const xs = allPoints.map((p) => p.x);
@@ -376,6 +380,44 @@ function Chart({
   const yScale = (y: number) =>
     padding.top + innerH - ((y - yMin) / (yMax - yMin)) * innerH;
 
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [hover, setHover] = useState<{
+    px: number;
+    py: number;
+    point: { x: number; y: number; key: string; color: string };
+  } | null>(null);
+
+  function handleMove(event: React.MouseEvent<SVGSVGElement>) {
+    if (empty || !svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    // Convert client px → viewBox px so we compare to xScale/yScale outputs.
+    const vbX = ((event.clientX - rect.left) / rect.width) * width;
+    const vbY = ((event.clientY - rect.top) / rect.height) * height;
+    let best: {
+      dist: number;
+      px: number;
+      py: number;
+      point: (typeof allPoints)[number];
+    } | null = null;
+    for (const point of allPoints) {
+      const px = xScale(point.x);
+      const py = yScale(point.y);
+      const dist = Math.hypot(px - vbX, py - vbY);
+      if (best === null || dist < best.dist) {
+        best = { dist, px, py, point };
+      }
+    }
+    if (best && best.dist < 30) {
+      setHover({ px: best.px, py: best.py, point: best.point });
+    } else {
+      setHover(null);
+    }
+  }
+
+  function handleLeave() {
+    setHover(null);
+  }
+
   return (
     <div className="bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md p-6 rounded-2xl border border-black/5 dark:border-white/5 shadow-sm flex flex-col">
       <div className="flex items-baseline justify-between mb-4">
@@ -384,119 +426,171 @@ function Chart({
           {yLabel}
         </span>
       </div>
-      <svg
-        viewBox={`0 0 ${width} ${height}`}
-        role="img"
-        aria-label={title}
-        className="w-full h-auto drop-shadow-sm"
-      >
-        <rect
-          x={padding.left}
-          y={padding.top}
-          width={innerW}
-          height={innerH}
-          fill="transparent"
-        />
-        <text
-          x={12}
-          y={padding.top + innerH / 2}
-          fontSize="10"
-          textAnchor="middle"
-          transform={`rotate(-90 12 ${padding.top + innerH / 2})`}
-          className="fill-zinc-500 dark:fill-zinc-400 font-semibold uppercase tracking-wider"
+      <div className="relative">
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${width} ${height}`}
+          role="img"
+          aria-label={title}
+          className="w-full h-auto drop-shadow-sm"
+          onMouseMove={handleMove}
+          onMouseLeave={handleLeave}
         >
-          {yLabel}
-        </text>
-        {[0, 0.25, 0.5, 0.75, 1].map((t) => {
-          const yVal = yMin + (yMax - yMin) * (1 - t);
-          const yPx = padding.top + innerH * t;
-          return (
-            <g key={t}>
-              <line
-                x1={padding.left}
-                x2={padding.left + innerW}
-                y1={yPx}
-                y2={yPx}
-                className="stroke-zinc-200 dark:stroke-zinc-800"
-              />
-              <text
-                x={padding.left - 6}
-                y={yPx + 4}
-                textAnchor="end"
-                fontSize="10"
-                className="fill-zinc-500"
-              >
-                {formatY ? formatY(yVal) : formatNumber(yVal)}
-              </text>
-            </g>
-          );
-        })}
-        {!empty && (
-          <>
-            <text
-              x={padding.left}
-              y={height - 8}
-              fontSize="10"
-              className="fill-zinc-400"
-            >
-              {new Date(xMin).toLocaleTimeString()}
-            </text>
-            <text
-              x={padding.left + innerW}
-              y={height - 8}
-              fontSize="10"
-              className="fill-zinc-400"
-              textAnchor="end"
-            >
-              {new Date(xMax).toLocaleTimeString()}
-            </text>
-          </>
-        )}
-        {series.map((s) => {
-          if (s.points.length === 0) return null;
-          const d = s.points
-            .map(
-              (p, i) =>
-                `${i === 0 ? "M" : "L"} ${xScale(p.x).toFixed(1)} ${yScale(p.y).toFixed(1)}`,
-            )
-            .join(" ");
-          return (
-            <g key={s.key}>
-              <path
-                d={d}
-                stroke={s.color}
-                fill="none"
-                strokeWidth={2.5}
-                className="drop-shadow-sm"
-              />
-              {s.points.map((p, i) => (
-                <circle
-                  key={i}
-                  cx={xScale(p.x)}
-                  cy={yScale(p.y)}
-                  r={3}
-                  fill={s.color}
-                  className="stroke-white dark:stroke-zinc-900"
-                  strokeWidth="1.5"
-                >
-                  <title>{`${s.key} @ ${new Date(p.x).toLocaleTimeString()}: ${formatY ? formatY(p.y) : formatNumber(p.y)} ${yLabel}`}</title>
-                </circle>
-              ))}
-            </g>
-          );
-        })}
-        {empty && (
+          <rect
+            x={padding.left}
+            y={padding.top}
+            width={innerW}
+            height={innerH}
+            fill="transparent"
+          />
           <text
-            x={width / 2}
-            y={height / 2}
+            x={12}
+            y={padding.top + innerH / 2}
+            fontSize="10"
             textAnchor="middle"
-            fontSize="12"
-            className="fill-zinc-400"
+            transform={`rotate(-90 12 ${padding.top + innerH / 2})`}
+            className="fill-zinc-500 dark:fill-zinc-400 font-semibold uppercase tracking-wider"
           >
-            No data
+            {yLabel}
           </text>
+          {[0, 0.25, 0.5, 0.75, 1].map((t) => {
+            const yVal = yMin + (yMax - yMin) * (1 - t);
+            const yPx = padding.top + innerH * t;
+            return (
+              <g key={t}>
+                <line
+                  x1={padding.left}
+                  x2={padding.left + innerW}
+                  y1={yPx}
+                  y2={yPx}
+                  className="stroke-zinc-200 dark:stroke-zinc-800"
+                />
+                <text
+                  x={padding.left - 6}
+                  y={yPx + 4}
+                  textAnchor="end"
+                  fontSize="10"
+                  className="fill-zinc-500"
+                >
+                  {formatY ? formatY(yVal) : formatNumber(yVal)}
+                </text>
+              </g>
+            );
+          })}
+          {!empty && (
+            <>
+              <text
+                x={padding.left}
+                y={height - 8}
+                fontSize="10"
+                className="fill-zinc-400"
+              >
+                {new Date(xMin).toLocaleTimeString()}
+              </text>
+              <text
+                x={padding.left + innerW}
+                y={height - 8}
+                fontSize="10"
+                className="fill-zinc-400"
+                textAnchor="end"
+              >
+                {new Date(xMax).toLocaleTimeString()}
+              </text>
+            </>
+          )}
+          {series.map((s) => {
+            if (s.points.length === 0) return null;
+            const d = s.points
+              .map(
+                (p, i) =>
+                  `${i === 0 ? "M" : "L"} ${xScale(p.x).toFixed(1)} ${yScale(p.y).toFixed(1)}`,
+              )
+              .join(" ");
+            return (
+              <g key={s.key}>
+                <path
+                  d={d}
+                  stroke={s.color}
+                  fill="none"
+                  strokeWidth={2.5}
+                  className="drop-shadow-sm"
+                />
+                {s.points.map((p, i) => (
+                  <circle
+                    key={i}
+                    cx={xScale(p.x)}
+                    cy={yScale(p.y)}
+                    r={3}
+                    fill={s.color}
+                    className="stroke-white dark:stroke-zinc-900"
+                    strokeWidth="1.5"
+                  >
+                    <title>{`${s.key} @ ${new Date(p.x).toLocaleTimeString()}: ${formatY ? formatY(p.y) : formatNumber(p.y)} ${yLabel}`}</title>
+                  </circle>
+                ))}
+              </g>
+            );
+          })}
+          {empty && (
+            <text
+              x={width / 2}
+              y={height / 2}
+              textAnchor="middle"
+              fontSize="12"
+              className="fill-zinc-400"
+            >
+              No data
+            </text>
+          )}
+          {hover && (
+            <g pointerEvents="none">
+              <line
+                x1={hover.px}
+                x2={hover.px}
+                y1={padding.top}
+                y2={padding.top + innerH}
+                strokeDasharray="3 3"
+                className="stroke-zinc-400 dark:stroke-zinc-500"
+                strokeWidth={1}
+              />
+              <circle
+                cx={hover.px}
+                cy={hover.py}
+                r={5}
+                fill={hover.point.color}
+                className="stroke-white dark:stroke-zinc-900"
+                strokeWidth={2}
+              />
+            </g>
+          )}
+        </svg>
+        {hover && (
+          <div
+            className="pointer-events-none absolute z-10 rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-900 px-3 py-2 text-xs shadow-lg"
+            style={{
+              left: `${(hover.px / width) * 100}%`,
+              top: `${(hover.py / height) * 100}%`,
+              transform:
+                hover.px > width * 0.6
+                  ? "translate(calc(-100% - 12px), -50%)"
+                  : "translate(12px, -50%)",
+            }}
+          >
+            <div className="font-semibold text-zinc-900 dark:text-zinc-100">
+              {formatY
+                ? formatY(hover.point.y)
+                : `${formatNumber(hover.point.y)} ${yLabel}`}
+            </div>
+            <div className="text-[10px] text-zinc-500 dark:text-zinc-400 mt-0.5 flex items-center gap-1.5">
+              <span
+                className="inline-block w-2 h-2 rounded-full"
+                style={{ background: hover.point.color }}
+              />
+              {hover.point.key} · {new Date(hover.point.x).toLocaleTimeString()}
+            </div>
+          </div>
         )}
-      </svg>
+      </div>
       <div className="mt-6 flex flex-wrap gap-4 text-xs font-semibold">
         {series.map((s) => (
           <span
