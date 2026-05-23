@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-roller
+  namespace: prism
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: metrics-roller
+  template:
+    metadata:
+      labels:
+        app: metrics-roller
+    spec:
+      containers:
+      - name: metrics-roller
+        image: IMAGE_REGISTRY/prism-workers:latest
+        imagePullPolicy: Always
+        command:
+        - python
+        - -m
+        - metrics_roller.main
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: POSTGRES_USER
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: POSTGRES_DB
+        - name: POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: POSTGRES_HOST
+        - name: DATABASE_URL
+          value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/$(POSTGRES_DB)"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: REDIS_PASSWORD
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: REDIS_HOST
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):6379/0"
+        - name: PRISM_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: PRISM_LOG_LEVEL

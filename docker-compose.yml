@@ -47,6 +47,7 @@ services:
   # without a rebuild. The .venv stays inside the image (created at build time).
 
   chatbot-api:
+    image: ${IMAGE_REGISTRY:-ghcr.io/REPLACEME}/prism-chatbot-api:latest
     build:
       context: .
       dockerfile: services/chatbot-api/Dockerfile
@@ -88,6 +89,7 @@ services:
       start_period: 15s
 
   ingestion-api:
+    image: ${IMAGE_REGISTRY:-ghcr.io/REPLACEME}/prism-ingestion-api:latest
     build:
       context: .
       dockerfile: services/ingestion-api/Dockerfile
@@ -127,6 +129,7 @@ services:
   # ── Workers ─────────────────────────────────────────────────────────────────
 
   log-writer:
+    image: ${IMAGE_REGISTRY:-ghcr.io/REPLACEME}/prism-workers:latest
     build:
       context: .
       dockerfile: services/workers/Dockerfile
@@ -146,6 +149,7 @@ services:
     restart: unless-stopped
 
   metrics-roller:
+    image: ${IMAGE_REGISTRY:-ghcr.io/REPLACEME}/prism-workers:latest
     build:
       context: .
       dockerfile: services/workers/Dockerfile
@@ -165,6 +169,7 @@ services:
     restart: unless-stopped
 
   metrics-reconciler:
+    image: ${IMAGE_REGISTRY:-ghcr.io/REPLACEME}/prism-workers:latest
     build:
       context: .
       dockerfile: services/workers/Dockerfile
@@ -181,6 +186,7 @@ services:
     restart: unless-stopped
 
   partition-cron:
+    image: ${IMAGE_REGISTRY:-ghcr.io/REPLACEME}/prism-workers:latest
     build:
       context: .
       dockerfile: services/workers/Dockerfile
@@ -200,8 +206,11 @@ services:
   # ── Chatbot UI ──────────────────────────────────────────────────────────────
 
   chatbot-ui:
+    image: ${IMAGE_REGISTRY:-ghcr.io/REPLACEME}/prism-chatbot-ui:latest
     build:
       context: web
+      args:
+        NEXT_PUBLIC_CHATBOT_API_URL: ${NEXT_PUBLIC_CHATBOT_API_URL:-http://localhost:8100}
     ports:
       - "3001:3000"
     environment:

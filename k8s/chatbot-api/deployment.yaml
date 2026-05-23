@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatbot-api
+  namespace: prism
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chatbot-api
+  template:
+    metadata:
+      labels:
+        app: chatbot-api
+    spec:
+      containers:
+      - name: chatbot-api
+        image: IMAGE_REGISTRY/prism-chatbot-api:latest
+        imagePullPolicy: Always
+        command:
+        - uvicorn
+        - chatbot_api.main:app
+        - --host
+        - "0.0.0.0"
+        - --port
+        - "8000"
+        - --workers
+        - "2"
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: POSTGRES_USER
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: POSTGRES_DB
+        - name: POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: POSTGRES_HOST
+        - name: DATABASE_URL
+          value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/$(POSTGRES_DB)"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: REDIS_PASSWORD
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: REDIS_HOST
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):6379/0"
+        - name: INGESTION_URL
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: INGESTION_URL
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: OPENAI_API_KEY
+              optional: true
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: ANTHROPIC_API_KEY
+              optional: true
+        - name: GEMINI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: GEMINI_API_KEY
+              optional: true
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: BEDROCK_AWS_ACCESS_KEY_ID
+              optional: true
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: BEDROCK_AWS_SECRET_ACCESS_KEY
+              optional: true
+        - name: AWS_REGION_NAME
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: BEDROCK_AWS_REGION
+              optional: true
+        - name: PRISM_CREDS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: PRISM_CREDS_KEY
+        - name: PRISM_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: PRISM_LOG_LEVEL
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5

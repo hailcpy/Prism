@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-api
+  namespace: prism
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingestion-api
+  template:
+    metadata:
+      labels:
+        app: ingestion-api
+    spec:
+      containers:
+      - name: ingestion-api
+        image: IMAGE_REGISTRY/prism-ingestion-api:latest
+        imagePullPolicy: Always
+        command:
+        - uvicorn
+        - ingestion_api.main:app
+        - --host
+        - "0.0.0.0"
+        - --port
+        - "8001"
+        - --workers
+        - "2"
+        ports:
+        - containerPort: 8001
+          name: http
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: POSTGRES_USER
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: POSTGRES_DB
+        - name: POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: POSTGRES_HOST
+        - name: DATABASE_URL
+          value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/$(POSTGRES_DB)"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: prism-secret
+              key: REDIS_PASSWORD
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: REDIS_HOST
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):6379/0"
+        - name: PRISM_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: PRISM_LOG_LEVEL
+        - name: PRISM_KEEP_RAW
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: PRISM_KEEP_RAW
+        - name: PRISM_REDACTOR
+          valueFrom:
+            configMapKeyRef:
+              name: prism-config
+              key: PRISM_REDACTOR
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8001
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8001
+          initialDelaySeconds: 5
+          periodSeconds: 5

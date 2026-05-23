@@ -21,3 +21,7 @@ npm-debug.log*
 
 # Local/editor
 .DS_Store
+
+# K8s secrets (never commit real secrets)
+k8s/secret.yaml
+/root/prism-secrets.env
