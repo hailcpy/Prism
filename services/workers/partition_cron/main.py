@@ -24,8 +24,10 @@ def run_once() -> None:
 
 
 def _assert_partitions_present() -> None:
-    # Without this, the `*_default` partition silently swallows rows when the
-    # ensure step is misconfigured — making the bug invisible until query time.
+    # The default partition is still queryable, but writes that land there
+    # bypass per-day pruning (slower scans, broken retention by daily DROP).
+    # Log loudly so the on-call sees the hygiene break before the dashboard
+    # latency does.
     today = datetime.now(UTC).date()
     expected_dates = (today, today + timedelta(days=1))
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
@@ -43,8 +45,9 @@ def _assert_partitions_present() -> None:
                 expected = f"{parent}_{d.strftime('%Y%m%d')}"
                 if expected not in present:
                     log.error(
-                        "partition-cron: missing expected partition %s; rows will "
-                        "fall into %s_default and be invisible to date-range queries",
+                        "partition-cron: missing daily partition %s; rows will "
+                        "fall into %s_default — partition pruning is disabled and "
+                        "daily DROP retention will not remove them",
                         expected,
                         parent,
                     )
