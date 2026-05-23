@@ -169,7 +169,10 @@ export default function SettingsPage() {
         <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-6">
           Pick a provider — the required fields are loaded from the backend.
         </p>
-        <form onSubmit={onSave} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <form
+          onSubmit={onSave}
+          className="grid grid-cols-1 sm:grid-cols-2 gap-4"
+        >
           <div className="flex flex-col gap-1">
             <label className="text-sm font-semibold">Provider</label>
             <select
@@ -225,7 +228,9 @@ export default function SettingsPage() {
                 required={f.required}
               />
               {f.default ? (
-                <span className="text-xs text-zinc-500">default: {f.default}</span>
+                <span className="text-xs text-zinc-500">
+                  default: {f.default}
+                </span>
               ) : null}
             </div>
           ))}
@@ -282,7 +287,9 @@ export default function SettingsPage() {
       <section className="bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md rounded-2xl border border-black/10 dark:border-white/10 p-6 shadow-sm">
         <h2 className="text-xl font-bold mb-4">Saved credentials</h2>
         {credentials.length === 0 ? (
-          <p className="text-zinc-500 dark:text-zinc-400">No credentials yet.</p>
+          <p className="text-zinc-500 dark:text-zinc-400">
+            No credentials yet.
+          </p>
         ) : null}
         {grouped.map(([provider, items]) => (
           <div key={provider} className="mb-6 last:mb-0">

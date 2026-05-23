@@ -60,6 +60,11 @@ export default function Home() {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const activeConversationIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    activeConversationIdRef.current = conversationId;
+  }, [conversationId]);
 
   const loadConversations = useCallback(async () => {
     try {
@@ -149,6 +154,7 @@ export default function Home() {
   }, [pendingDelete, deleteBusy]);
 
   async function startNewChat() {
+    abortRef.current?.abort();
     setConversationId(null);
     setMessages([]);
     setStatus("");
@@ -197,6 +203,9 @@ export default function Home() {
         return;
       }
     }
+    const streamConversationId = activeId;
+    const isActive = () =>
+      activeConversationIdRef.current === streamConversationId;
     const now = new Date().toISOString();
     setMessages((current) => [
       ...current,
@@ -211,6 +220,7 @@ export default function Home() {
     setDraft("");
     const controller = new AbortController();
     abortRef.current = controller;
+    let aborted = false;
     try {
       const response = await fetch(
         `${apiUrl}/v1/conversations/${activeId}/messages`,
@@ -238,6 +248,7 @@ export default function Home() {
       }
       for await (const { event: name, data } of readSseStream(response.body)) {
         if (name === "assistant_message") {
+          if (!isActive()) continue;
           const msgId = String(data.id ?? `local-${Date.now()}`);
           const createdAt = String(data.created_at ?? new Date().toISOString());
           setMessages((current) => {
@@ -257,6 +268,7 @@ export default function Home() {
             ];
           });
         } else if (name === "token") {
+          if (!isActive()) continue;
           const delta = String(data.delta ?? "");
           setMessages((current) => {
             const next = [...current];
@@ -279,28 +291,45 @@ export default function Home() {
           });
         } else if (name === "title") {
           const title = typeof data.title === "string" ? data.title : null;
-          if (title && activeId) {
+          if (title) {
             setConversations((current) =>
-              current.map((c) => (c.id === activeId ? { ...c, title } : c)),
+              current.map((c) =>
+                c.id === streamConversationId ? { ...c, title } : c,
+              ),
             );
           }
         } else if (name === "done") {
-          await getMessages(activeId).then(setMessages);
+          if (isActive())
+            await getMessages(streamConversationId).then(setMessages);
         } else if (name === "error") {
+          if (!isActive()) continue;
           const detail = data.error as { message?: string } | undefined;
           setStatus(detail?.message ?? "stream error");
         }
       }
-      await getMessages(activeId).then(setMessages);
+      if (isActive()) await getMessages(streamConversationId).then(setMessages);
       await loadConversations();
-      await refreshCost(activeId);
+      if (isActive()) await refreshCost(streamConversationId);
     } catch (e) {
-      if ((e as Error).name !== "AbortError") {
-        setStatus(e instanceof Error ? e.message : "send failed");
+      if ((e as Error).name === "AbortError") {
+        aborted = true;
+      } else {
+        if (isActive())
+          setStatus(e instanceof Error ? e.message : "send failed");
       }
     } finally {
       setBusy(false);
       abortRef.current = null;
+      if (aborted && isActive()) {
+        // Backend persists the partial assistant message as `cancelled`; reload
+        // so the stale `pending` row in local state is replaced.
+        try {
+          await getMessages(streamConversationId).then(setMessages);
+        } catch {
+          // best-effort
+        }
+        await loadConversations();
+      }
     }
   }
 
@@ -351,6 +380,7 @@ export default function Home() {
                 type="button"
                 className="w-full text-left p-3 pr-10"
                 onClick={() => {
+                  if (c.id !== conversationId) abortRef.current?.abort();
                   setConversationId(c.id);
                   setModel(c.model_default);
                 }}
