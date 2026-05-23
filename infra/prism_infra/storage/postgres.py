@@ -175,6 +175,19 @@ class PostgresLogStore:
             cur.execute(sql, params)
             return [MetricsRow(**row) for row in cur.fetchall()]
 
+    def get_metric_dimensions(self) -> tuple[list[str], list[str]]:
+        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT model FROM metrics_minute WHERE model IS NOT NULL ORDER BY model"
+            )
+            models = [row[0] for row in cur.fetchall()]
+            cur.execute(
+                "SELECT DISTINCT provider FROM metrics_minute "
+                "WHERE provider IS NOT NULL ORDER BY provider"
+            )
+            providers = [row[0] for row in cur.fetchall()]
+            return models, providers
+
     def get_logs(self, query: LogsQuery) -> list[InferenceEvent]:
         sql = """
             SELECT id, created_at, ts_start, ts_end, conversation_id, message_id,

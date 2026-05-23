@@ -61,9 +61,11 @@ export type ConversationCost = {
   cost_usd: number;
 };
 
+export type ThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
 export type ThinkingConfig = {
   enabled: boolean;
-  budget_tokens?: number;
+  effort?: ThinkingEffort;
 };
 
 export async function getConversations(): Promise<Conversation[]> {

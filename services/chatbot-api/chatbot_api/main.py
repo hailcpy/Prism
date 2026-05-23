@@ -294,8 +294,29 @@ class ListMessagesResponse(BaseModel):
     messages: list[MessageBody]
 
 
+ThinkingEffort = Literal["low", "medium", "high", "xhigh", "max"]
+
+THINKING_EFFORT_PCT: dict[str, float] = {
+    "low": 0.10,
+    "medium": 0.25,
+    "high": 0.50,
+    "xhigh": 0.75,
+    "max": 0.95,
+}
+THINKING_MAX_BUDGET_TOKENS = 32000
+THINKING_MIN_BUDGET_TOKENS = 1024
+OPENAI_REASONING_EFFORT: dict[str, str] = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+    "max": "high",
+}
+
+
 class ThinkingConfig(BaseModel):
     enabled: bool = False
+    effort: ThinkingEffort | None = None
     budget_tokens: int | None = None
 
 
@@ -678,6 +699,35 @@ def _llm_messages(*, system_prompt: str | None, history: list[Message]) -> list[
     return messages
 
 
+def _thinking_provider(model: str) -> str:
+    bare = model.removeprefix("bedrock/").removeprefix("gemini/").lower()
+    if bare.startswith(("gpt-", "o1", "o3", "o4")) or bare.startswith("openai/"):
+        return "openai"
+    if "claude" in bare:
+        return "anthropic"
+    if "gemini" in bare:
+        return "gemini"
+    return "anthropic"
+
+
+def _thinking_budget_tokens(effort: ThinkingEffort | None, fallback: int | None) -> int:
+    if effort is not None:
+        budget = int(THINKING_MAX_BUDGET_TOKENS * THINKING_EFFORT_PCT[effort])
+        return max(THINKING_MIN_BUDGET_TOKENS, budget)
+    if fallback and fallback > 0:
+        return fallback
+    return int(THINKING_MAX_BUDGET_TOKENS * THINKING_EFFORT_PCT["medium"])
+
+
+def _thinking_params(model: str, thinking: ThinkingConfig) -> dict[str, Any]:
+    provider = _thinking_provider(model)
+    if provider == "openai":
+        effort = thinking.effort or "medium"
+        return {"reasoning_effort": OPENAI_REASONING_EFFORT[effort]}
+    budget = _thinking_budget_tokens(thinking.effort, thinking.budget_tokens)
+    return {"thinking": {"type": "enabled", "budget_tokens": budget}}
+
+
 def _build_agent(
     *,
     model: str,
@@ -694,8 +744,7 @@ def _build_agent(
     client_args.update(llm.litellm_client_args(credential))
     params: dict[str, Any] = {"stream": True}
     if thinking and thinking.enabled:
-        budget = thinking.budget_tokens or 4096
-        params["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        params.update(_thinking_params(model, thinking))
     model_client = LiteLLMModel(
         client_args=client_args,
         model_id=model,
@@ -810,6 +859,11 @@ class MetricsResponse(BaseModel):
     buckets: list[MetricsBucket]
 
 
+class MetricsDimensionsResponse(BaseModel):
+    models: list[str]
+    providers: list[str]
+
+
 class ConversationCostResponse(BaseModel):
     conversation_id: str
     calls: int
@@ -862,6 +916,12 @@ def get_metrics(
             for row in rows
         ]
     )
+
+
+@app.get("/v1/metrics/dimensions", response_model=MetricsDimensionsResponse)
+def get_metric_dimensions(request: Request) -> MetricsDimensionsResponse:
+    models, providers = _get_log_store(request.app).get_metric_dimensions()
+    return MetricsDimensionsResponse(models=models, providers=providers)
 
 
 @app.get(

@@ -83,6 +83,11 @@ class InMemoryLogStore:
             cost_usd=sum(e.cost_usd or 0.0 for e in matches),
         )
 
+    def get_metric_dimensions(self) -> tuple[list[str], list[str]]:
+        models = sorted({row.model for row in self.metrics.values() if row.model})
+        providers = sorted({row.provider for row in self.metrics.values() if row.provider})
+        return models, providers
+
     def get_logs(self, query: LogsQuery) -> list[InferenceEvent]:
         rows = [
             event

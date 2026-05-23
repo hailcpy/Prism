@@ -28,6 +28,8 @@ class LogStore(Protocol):
 
     def get_conversation_cost(self, conversation_id: str) -> ConversationCost: ...
 
+    def get_metric_dimensions(self) -> tuple[list[str], list[str]]: ...
+
 
 class RawPayloadStore(Protocol):
     def put(

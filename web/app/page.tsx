@@ -51,7 +51,9 @@ export default function Home() {
   const [modelStatus, setModelStatus] = useState("");
   const [cost, setCost] = useState<ConversationCost | null>(null);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
-  const [thinkingBudget, setThinkingBudget] = useState(4096);
+  const [thinkingEffort, setThinkingEffort] = useState<
+    "low" | "medium" | "high" | "xhigh" | "max"
+  >("medium");
   const abortRef = useRef<AbortController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
 
@@ -192,7 +194,7 @@ export default function Home() {
             model,
             thinking:
               selected.thinking_supported && thinkingEnabled
-                ? { enabled: true, budget_tokens: thinkingBudget }
+                ? { enabled: true, effort: thinkingEffort }
                 : undefined,
           }),
           signal: controller.signal,
@@ -491,23 +493,30 @@ export default function Home() {
                     <span className="font-semibold">Thinking</span>
                   </label>
                   {thinkingEnabled && (
-                    <>
-                      <input
-                        type="range"
-                        min={1024}
-                        max={32000}
-                        step={512}
-                        value={thinkingBudget}
-                        onChange={(e) =>
-                          setThinkingBudget(Number(e.target.value))
-                        }
-                        className="w-24 accent-[#2453ff]"
-                        aria-label="Thinking budget"
-                      />
-                      <span className="tabular-nums text-[11px] text-zinc-500">
-                        {thinkingBudget.toLocaleString()} tok
-                      </span>
-                    </>
+                    <div
+                      role="radiogroup"
+                      aria-label="Thinking effort"
+                      className="flex items-center gap-0.5 rounded-md border border-zinc-300 dark:border-zinc-700 p-0.5"
+                    >
+                      {(["low", "medium", "high", "xhigh", "max"] as const).map(
+                        (level) => (
+                          <button
+                            key={level}
+                            type="button"
+                            role="radio"
+                            aria-checked={thinkingEffort === level}
+                            onClick={() => setThinkingEffort(level)}
+                            className={`px-1.5 py-0.5 rounded text-[11px] font-medium uppercase tracking-wide transition-colors ${
+                              thinkingEffort === level
+                                ? "bg-[#2453ff] text-white"
+                                : "text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                            }`}
+                          >
+                            {level}
+                          </button>
+                        ),
+                      )}
+                    </div>
                   )}
                 </div>
               )}

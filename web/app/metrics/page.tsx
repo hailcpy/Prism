@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getModels, type ModelOption } from "@/lib/api";
 
 type Bucket = {
   minute_bucket: string;
@@ -44,21 +43,29 @@ export default function MetricsPage() {
   const [modelFilter, setModelFilter] = useState<string>("");
   const [providerFilter, setProviderFilter] = useState<string>("");
   const [buckets, setBuckets] = useState<Bucket[]>([]);
-  const [allModels, setAllModels] = useState<ModelOption[]>([]);
+  const [knownModels, setKnownModels] = useState<string[]>([]);
+  const [knownProviders, setKnownProviders] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
 
+  const loadDimensions = useCallback(async () => {
+    try {
+      const response = await fetch(`${apiUrl}/v1/metrics/dimensions`);
+      if (!response.ok) return;
+      const body = (await response.json()) as {
+        models: string[];
+        providers: string[];
+      };
+      setKnownModels(body.models ?? []);
+      setKnownProviders(body.providers ?? []);
+    } catch {
+      // ignore
+    }
+  }, [apiUrl]);
+
   useEffect(() => {
-    let cancelled = false;
-    getModels()
-      .then((m) => {
-        if (!cancelled) setAllModels(m);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void loadDimensions();
+  }, [loadDimensions]);
 
   const load = useCallback(async () => {
     const now = new Date();
@@ -89,15 +96,13 @@ export default function MetricsPage() {
   }, [load]);
 
   const models = useMemo(() => {
-    const fromModels = allModels.map((m) => m.id);
     const fromBuckets = buckets.map((b) => b.model);
-    return Array.from(new Set([...fromModels, ...fromBuckets])).sort();
-  }, [allModels, buckets]);
+    return Array.from(new Set([...knownModels, ...fromBuckets])).sort();
+  }, [knownModels, buckets]);
   const providers = useMemo(() => {
-    const fromModels = allModels.map((m) => m.provider);
     const fromBuckets = buckets.map((b) => b.provider);
-    return Array.from(new Set([...fromModels, ...fromBuckets])).sort();
-  }, [allModels, buckets]);
+    return Array.from(new Set([...knownProviders, ...fromBuckets])).sort();
+  }, [knownProviders, buckets]);
 
   const seriesByModel = useMemo(() => {
     const grouped: Record<string, Bucket[]> = {};

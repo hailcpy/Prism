@@ -220,7 +220,8 @@ async def _discover_openai(client: httpx.AsyncClient, api_key: str) -> list[dict
     ids = sorted(
         item["id"]
         for item in response.json().get("data", [])
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
         and _is_openai_chat_model(item["id"])
     )
     return [
