@@ -13,7 +13,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from redis.exceptions import RedisError
 
-from ingestion_api.redaction import RegexRedactor
+from ingestion_api.redaction import Redactor, build_redactor
 from prism_infra.bus import Bus, RedisStreamsBus
 from prism_infra.events import event_to_wire, tool_event_to_wire
 from prism_infra.models import ErrorInfo, InferenceEvent, ToolErrorInfo, ToolInvocationEvent, Usage
@@ -117,7 +117,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="prism-ingestion-api", version="0.1.0", lifespan=lifespan)
 app.state.bus = None
 app.state.raw_payload_store = None
-app.state.redactor = RegexRedactor()
+app.state.redactor = build_redactor()
 
 
 @app.get("/healthz")
@@ -130,7 +130,7 @@ def ingest_batch(request: Request, body: Any = BATCH_BODY) -> BatchResponse:
     events = _extract_events(body)
     bus = _get_bus(request.app)
     raw_payload_store = _get_raw_payload_store(request.app)
-    redactor: RegexRedactor = request.app.state.redactor
+    redactor: Redactor = request.app.state.redactor
 
     accepted = 0
     rejected: list[RejectedEvent] = []
@@ -169,7 +169,7 @@ def _enforce_event_size(raw_event: Any) -> None:
 
 def _sanitize_any_event(
     raw_event: Any,
-    redactor: RegexRedactor,
+    redactor: Redactor,
     raw_payload_store: RawPayloadStore,
 ) -> dict[str, Any]:
     if isinstance(raw_event, dict) and raw_event.get("event_type") == "tool_invocation":
@@ -183,7 +183,7 @@ def _sanitize_any_event(
 
 def _sanitize_event(
     body: EventBody,
-    redactor: RegexRedactor,
+    redactor: Redactor,
     raw_payload_store: RawPayloadStore,
 ) -> InferenceEvent:
     raw_payload_uri = None
@@ -225,7 +225,7 @@ def _sanitize_event(
     )
 
 
-def _sanitize_tool_event(body: ToolEventBody, redactor: RegexRedactor) -> ToolInvocationEvent:
+def _sanitize_tool_event(body: ToolEventBody, redactor: Redactor) -> ToolInvocationEvent:
     return ToolInvocationEvent(
         schema_version=body.schema_version,
         tool_invocation_id=str(body.tool_invocation_id),
