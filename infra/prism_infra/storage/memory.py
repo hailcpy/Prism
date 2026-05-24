@@ -20,7 +20,6 @@ class InMemoryLogStore:
     def __init__(self) -> None:
         self.logs: list[InferenceEvent] = []
         self.tool_events: list[ToolInvocationEvent] = []
-        self.metrics: dict[tuple[str, str, str], MetricsRow] = {}
 
     def write_logs_batch(self, events: list[InferenceEvent]) -> None:
         seen = {event.inference_id for event in self.logs}
@@ -38,21 +37,7 @@ class InMemoryLogStore:
             self.tool_events.append(event)
             seen.add(event.tool_invocation_id)
 
-    def upsert_metrics(self, rows: list[MetricsRow]) -> None:
-        for row in rows:
-            key = (row.minute_bucket.isoformat(), row.model, row.provider)
-            self.metrics[key] = row
-
     def get_metrics(self, query: MetricsQuery) -> list[MetricsRow]:
-        return [
-            row
-            for row in self.metrics.values()
-            if query.start <= row.minute_bucket < query.end
-            and (not query.models or row.model in query.models)
-            and (not query.providers or row.provider in query.providers)
-        ]
-
-    def reconcile_metrics(self, start: datetime, end: datetime) -> int:
         buckets: dict[tuple[datetime, str, str], list[InferenceEvent]] = defaultdict(list)
         for event in self.logs:
             created = event.created_at
@@ -60,16 +45,18 @@ class InMemoryLogStore:
                 continue
             if created.tzinfo is None:
                 created = created.replace(tzinfo=UTC)
-            if not (start <= created < end):
+            if not (query.start <= created < query.end):
+                continue
+            if query.models and event.model not in query.models:
+                continue
+            if query.providers and event.provider not in query.providers:
                 continue
             bucket = created.astimezone(UTC).replace(second=0, microsecond=0)
             buckets[(bucket, event.model, event.provider)].append(event)
-        rows = [
-            _build_metrics_row(bucket, model, provider, events)
-            for (bucket, model, provider), events in buckets.items()
-        ]
-        self.upsert_metrics(rows)
-        return len(rows)
+        return sorted(
+            [_build_metrics_row(b, m, p, evts) for (b, m, p), evts in buckets.items()],
+            key=lambda r: (r.minute_bucket, r.model, r.provider),
+        )
 
     def get_conversation_cost(self, conversation_id: str) -> ConversationCost:
         matches = [e for e in self.logs if e.conversation_id == conversation_id]
@@ -188,8 +175,8 @@ class InMemoryLogStore:
         return out
 
     def get_metric_dimensions(self) -> tuple[list[str], list[str]]:
-        models = sorted({row.model for row in self.metrics.values() if row.model})
-        providers = sorted({row.provider for row in self.metrics.values() if row.provider})
+        models = sorted({e.model for e in self.logs if e.model})
+        providers = sorted({e.provider for e in self.logs if e.provider})
         return models, providers
 
     def get_logs(self, query: LogsQuery) -> list[InferenceEvent]:

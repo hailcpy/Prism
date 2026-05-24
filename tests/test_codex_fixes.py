@@ -270,40 +270,6 @@ def test_bootstrap_env_is_idempotent(tmp_path, monkeypatch) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_roller_window_bucket_computes_ttft_percentiles() -> None:
-    from metrics_roller.main import _WindowBucket
-
-    bucket = _WindowBucket(
-        minute_bucket=datetime(2026, 5, 21, 10, 0, tzinfo=UTC),
-        model="m",
-        provider="openai",
-    )
-    base = datetime(2026, 5, 21, 10, 0, tzinfo=UTC)
-    for i in range(20):
-        bucket.add(_make_event(latency_ms=100 + i, ttft_ms=10 + i, model="m", when=base))
-    bucket.add(_make_event(latency_ms=500, ttft_ms=None, model="m", when=base))
-    row = bucket.to_row()
-    assert row.ttft_p50_ms is not None and 10 <= row.ttft_p50_ms <= 30
-    assert row.ttft_p95_ms is not None and row.ttft_p95_ms >= row.ttft_p50_ms
-    # The latency value with no TTFT must still be counted in latency.
-    assert row.count == 21
-
-
-def test_roller_returns_none_ttft_when_no_streaming_events() -> None:
-    from metrics_roller.main import _WindowBucket
-
-    bucket = _WindowBucket(
-        minute_bucket=datetime(2026, 5, 21, 10, 0, tzinfo=UTC),
-        model="m",
-        provider="openai",
-    )
-    base = datetime(2026, 5, 21, 10, 0, tzinfo=UTC)
-    bucket.add(_make_event(latency_ms=42, ttft_ms=None, model="m", when=base))
-    row = bucket.to_row()
-    assert row.ttft_p50_ms is None
-    assert row.ttft_p95_ms is None
-
-
 # --------------------------------------------------------------------------- #
 # Reset ingestion app state between tests.
 # --------------------------------------------------------------------------- #

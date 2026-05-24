@@ -7,16 +7,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from chatbot_api.main import _get_log_store, app
-from metrics_reconciler.main import run_once as reconciler_run_once
-from metrics_roller.main import WindowAggregator, ingest_messages
-from prism_infra.bus.base import StreamMessage
-from prism_infra.events import event_to_wire
 from prism_infra.models import (
     InferenceEvent,
     InferenceStatus,
     LogsQuery,
     MetricsQuery,
-    MetricsRow,
     Usage,
 )
 from prism_infra.storage import InMemoryLogStore
@@ -55,112 +50,7 @@ def _event(
     )
 
 
-def test_window_aggregator_closes_after_grace() -> None:
-    bucket = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
-    agg = WindowAggregator(window_seconds=60, grace_seconds=5)
-
-    for i, latency in enumerate([100, 200, 300, 400]):
-        agg.add(
-            f"id-{i}",
-            _event(
-                inference_id=f"00000000-0000-7000-8000-{i:012d}",
-                bucket=bucket,
-                latency_ms=latency,
-                offset_seconds=i,
-            ),
-        )
-
-    # Still open.
-    rows, ack_ids = agg.close_due(bucket + timedelta(seconds=60))
-    assert rows == []
-    assert ack_ids == []
-
-    # Past grace.
-    rows, ack_ids = agg.close_due(bucket + timedelta(seconds=66))
-    assert len(rows) == 1
-    assert sorted(ack_ids) == [f"id-{i}" for i in range(4)]
-    row = rows[0]
-    assert row.minute_bucket == bucket
-    assert row.count == 4
-    assert row.error_count == 0
-    # percentile_disc(0.5) over [100,200,300,400] → 200; (0.95) → 400
-    assert row.latency_p50_ms == 200
-    assert row.latency_p95_ms == 400
-    assert row.prompt_tokens_sum == 40
-    assert row.completion_tokens_sum == 20
-
-
-def test_window_aggregator_separates_keys() -> None:
-    bucket = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
-    agg = WindowAggregator(grace_seconds=0)
-    agg.add(
-        "a",
-        _event(
-            inference_id="00000000-0000-7000-8000-000000000001",
-            bucket=bucket,
-            model="gpt-4o",
-            provider="openai",
-            latency_ms=100,
-        ),
-    )
-    agg.add(
-        "b",
-        _event(
-            inference_id="00000000-0000-7000-8000-000000000002",
-            bucket=bucket,
-            model="claude",
-            provider="anthropic",
-            latency_ms=400,
-            status="error",
-        ),
-    )
-    rows, _ = agg.close_due(bucket + timedelta(seconds=120))
-    rows_by_model = {r.model: r for r in rows}
-    assert set(rows_by_model) == {"gpt-4o", "claude"}
-    assert rows_by_model["claude"].error_count == 1
-    assert rows_by_model["gpt-4o"].error_count == 0
-
-
-def test_window_aggregator_dedupes_reclaimed_stream_messages() -> None:
-    bucket = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
-    agg = WindowAggregator(grace_seconds=0)
-    event = _event(
-        inference_id="00000000-0000-7000-8000-000000000001",
-        bucket=bucket,
-        model="bedrock/converse/arn:aws:bedrock:us-west-2:123:application-inference-profile/p",
-        provider="bedrock",
-        latency_ms=250,
-    )
-
-    agg.add("redis-id-1", event)
-    agg.add("redis-id-1", event)
-    agg.add("redis-id-1", event)
-
-    rows, ack_ids = agg.close_due(bucket + timedelta(seconds=120))
-
-    assert ack_ids == ["redis-id-1"]
-    assert len(rows) == 1
-    assert rows[0].count == 1
-    assert rows[0].prompt_tokens_sum == 10
-
-
-def test_ingest_messages_skips_invalid() -> None:
-    bucket = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
-    valid_event = _event(inference_id="00000000-0000-7000-8000-000000000001", bucket=bucket)
-    messages = [
-        StreamMessage(id="m1", event=event_to_wire(valid_event)),
-        StreamMessage(id="m2", event={"not": "an event"}),
-    ]
-    agg = WindowAggregator(grace_seconds=0)
-    accepted, skipped_ids = ingest_messages(messages, agg)
-    assert accepted == 1
-    assert skipped_ids == ["m2"]
-    rows, ack_ids = agg.close_due(bucket + timedelta(seconds=120))
-    assert len(rows) == 1
-    assert ack_ids == ["m1"]
-
-
-def test_in_memory_reconcile_matches_aggregator() -> None:
+def test_get_metrics_aggregates_from_logs() -> None:
     bucket = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
     store = InMemoryLogStore()
     events = [
@@ -175,8 +65,6 @@ def test_in_memory_reconcile_matches_aggregator() -> None:
     ]
     store.write_logs_batch(events)
 
-    written = store.reconcile_metrics(bucket - timedelta(minutes=1), bucket + timedelta(minutes=1))
-    assert written == 1
     rows = store.get_metrics(
         MetricsQuery(start=bucket - timedelta(minutes=1), end=bucket + timedelta(minutes=1))
     )
@@ -188,7 +76,7 @@ def test_in_memory_reconcile_matches_aggregator() -> None:
     assert row.latency_p95_ms == 400
 
 
-def test_reconciler_run_once_invokes_store(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_metrics_endpoint_returns_buckets() -> None:
     bucket = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
     store = InMemoryLogStore()
     store.write_logs_batch(
@@ -196,47 +84,20 @@ def test_reconciler_run_once_invokes_store(monkeypatch: pytest.MonkeyPatch) -> N
             _event(
                 inference_id="00000000-0000-7000-8000-000000000001",
                 bucket=bucket,
-                latency_ms=150,
-            )
-        ]
-    )
-
-    class FrozenDatetime(datetime):
-        @classmethod
-        def now(cls, tz: Any = None) -> datetime:  # type: ignore[override]
-            return bucket + timedelta(minutes=2)
-
-    monkeypatch.setattr("metrics_reconciler.main.datetime", FrozenDatetime)
-    written = reconciler_run_once(store, window_minutes=15)
-    assert written == 1
-
-
-def test_metrics_endpoint_returns_buckets() -> None:
-    bucket = datetime(2026, 5, 22, 12, 0, tzinfo=UTC)
-    store = InMemoryLogStore()
-    store.upsert_metrics(
-        [
-            MetricsRow(
-                minute_bucket=bucket,
                 model="gpt-4o",
                 provider="openai",
-                count=5,
-                error_count=1,
-                latency_p50_ms=120,
-                latency_p95_ms=300,
-                prompt_tokens_sum=500,
-                completion_tokens_sum=250,
+                latency_ms=120,
+                prompt_tokens=100,
+                completion_tokens=50,
             ),
-            MetricsRow(
-                minute_bucket=bucket,
+            _event(
+                inference_id="00000000-0000-7000-8000-000000000002",
+                bucket=bucket,
                 model="claude",
                 provider="anthropic",
-                count=3,
-                error_count=0,
-                latency_p50_ms=200,
-                latency_p95_ms=400,
-                prompt_tokens_sum=300,
-                completion_tokens_sum=150,
+                latency_ms=200,
+                prompt_tokens=100,
+                completion_tokens=50,
             ),
         ]
     )
@@ -269,7 +130,6 @@ def test_metrics_endpoint_log_store_helper_caches() -> None:
 
 
 def test_metrics_query_unused_logs_query() -> None:
-    # quick sanity: LogsQuery type still importable in tests context.
     assert LogsQuery is not None
 
 
