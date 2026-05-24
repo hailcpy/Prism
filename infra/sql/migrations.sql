@@ -4,6 +4,8 @@
 -- init.sql; init.sql is for fresh volumes (docker-entrypoint-initdb.d),
 -- migrations.sql is for everyone else.
 
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
 ALTER TABLE messages
   ADD COLUMN IF NOT EXISTS metadata_jsonb JSONB NOT NULL DEFAULT '{}'::jsonb;
 
@@ -24,11 +26,6 @@ ALTER TABLE inference_logs
   ADD COLUMN IF NOT EXISTS cached_prompt_tokens INT,
   ADD COLUMN IF NOT EXISTS reasoning_tokens INT,
   ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION;
-
-ALTER TABLE metrics_minute
-  ADD COLUMN IF NOT EXISTS cost_usd_sum DOUBLE PRECISION NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS ttft_p50_ms INT,
-  ADD COLUMN IF NOT EXISTS ttft_p95_ms INT;
 
 CREATE TABLE IF NOT EXISTS dashboards (
   id UUID PRIMARY KEY,

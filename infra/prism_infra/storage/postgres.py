@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import psycopg
-from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -124,46 +123,10 @@ class PostgresLogStore:
                 rows,
             )
 
-    def upsert_metrics(self, rows: list[MetricsRow]) -> None:
-        if not rows:
-            return
-
-        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO metrics_minute (
-                  minute_bucket, model, provider, count, error_count,
-                  latency_p50_ms, latency_p95_ms, ttft_p50_ms, ttft_p95_ms,
-                  prompt_tokens_sum, completion_tokens_sum, cost_usd_sum
-                )
-                VALUES (
-                  %(minute_bucket)s, %(model)s, %(provider)s, %(count)s,
-                  %(error_count)s, %(latency_p50_ms)s, %(latency_p95_ms)s,
-                  %(ttft_p50_ms)s, %(ttft_p95_ms)s,
-                  %(prompt_tokens_sum)s, %(completion_tokens_sum)s,
-                  %(cost_usd_sum)s
-                )
-                ON CONFLICT (minute_bucket, model, provider) DO UPDATE SET
-                  count = EXCLUDED.count,
-                  error_count = EXCLUDED.error_count,
-                  latency_p50_ms = EXCLUDED.latency_p50_ms,
-                  latency_p95_ms = EXCLUDED.latency_p95_ms,
-                  ttft_p50_ms = EXCLUDED.ttft_p50_ms,
-                  ttft_p95_ms = EXCLUDED.ttft_p95_ms,
-                  prompt_tokens_sum = EXCLUDED.prompt_tokens_sum,
-                  completion_tokens_sum = EXCLUDED.completion_tokens_sum,
-                  cost_usd_sum = EXCLUDED.cost_usd_sum
-                """,
-                [row.__dict__ for row in rows],
-            )
-
     def get_metrics(self, query: MetricsQuery) -> list[MetricsRow]:
         sql = """
             SELECT minute_bucket, model, provider, count, error_count,
-                   latency_p50_ms, latency_p95_ms,
-                   ttft_p50_ms, ttft_p95_ms,
-                   prompt_tokens_sum,
-                   completion_tokens_sum, cost_usd_sum
+                   prompt_tokens_sum, completion_tokens_sum, cost_usd_sum
             FROM metrics_minute
             WHERE minute_bucket >= %(start)s AND minute_bucket < %(end)s
         """
@@ -178,7 +141,16 @@ class PostgresLogStore:
 
         with psycopg.connect(self.database_url) as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(sql, params)
-            return [MetricsRow(**row) for row in cur.fetchall()]
+            return [
+                MetricsRow(
+                    latency_p50_ms=0,
+                    latency_p95_ms=0,
+                    ttft_p50_ms=None,
+                    ttft_p95_ms=None,
+                    **row,
+                )
+                for row in cur.fetchall()
+            ]
 
     _PERCENTILE_COLUMNS: tuple[str, ...] = ("latency_ms", "ttft_ms")
 
@@ -310,11 +282,11 @@ class PostgresLogStore:
     def get_metric_dimensions(self) -> tuple[list[str], list[str]]:
         with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT DISTINCT model FROM metrics_minute WHERE model IS NOT NULL ORDER BY model"
+                "SELECT DISTINCT model FROM inference_logs WHERE model IS NOT NULL ORDER BY model"
             )
             models = [row[0] for row in cur.fetchall()]
             cur.execute(
-                "SELECT DISTINCT provider FROM metrics_minute "
+                "SELECT DISTINCT provider FROM inference_logs "
                 "WHERE provider IS NOT NULL ORDER BY provider"
             )
             providers = [row[0] for row in cur.fetchall()]
@@ -374,95 +346,6 @@ class PostgresLogStore:
                 reasoning_tokens=int(row.get("reasoning_tokens", 0)),
                 cost_usd=float(row.get("cost_usd", 0.0)),
             )
-
-    def reconcile_metrics(self, start: datetime, end: datetime) -> int:
-        """Recompute metrics_minute over [start, end) from inference_logs.
-
-        This is the canonical, idempotent rollup path (ADR-0010, Track 2).
-        Returns the number of rows upserted.
-        """
-        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO metrics_minute (
-                  minute_bucket, model, provider, count, error_count,
-                  latency_p50_ms, latency_p95_ms, ttft_p50_ms, ttft_p95_ms,
-                  prompt_tokens_sum, completion_tokens_sum, cost_usd_sum
-                )
-                SELECT
-                  date_trunc('minute', created_at) AS minute_bucket,
-                  model,
-                  provider,
-                  count(*)::int AS count,
-                  count(*) FILTER (WHERE status <> 'ok')::int AS error_count,
-                  COALESCE(percentile_disc(0.50) WITHIN GROUP (ORDER BY latency_ms), 0)::int
-                    AS latency_p50_ms,
-                  COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::int
-                    AS latency_p95_ms,
-                  percentile_disc(0.50) WITHIN GROUP (ORDER BY ttft_ms)
-                    FILTER (WHERE ttft_ms IS NOT NULL)::int AS ttft_p50_ms,
-                  percentile_disc(0.95) WITHIN GROUP (ORDER BY ttft_ms)
-                    FILTER (WHERE ttft_ms IS NOT NULL)::int AS ttft_p95_ms,
-                  COALESCE(sum(prompt_tokens), 0)::bigint AS prompt_tokens_sum,
-                  COALESCE(sum(completion_tokens), 0)::bigint AS completion_tokens_sum,
-                  COALESCE(sum(cost_usd), 0)::double precision AS cost_usd_sum
-                FROM inference_logs
-                WHERE created_at >= %(start)s AND created_at < %(end)s
-                GROUP BY 1, 2, 3
-                ON CONFLICT (minute_bucket, model, provider) DO UPDATE SET
-                  count = EXCLUDED.count,
-                  error_count = EXCLUDED.error_count,
-                  latency_p50_ms = EXCLUDED.latency_p50_ms,
-                  latency_p95_ms = EXCLUDED.latency_p95_ms,
-                  ttft_p50_ms = EXCLUDED.ttft_p50_ms,
-                  ttft_p95_ms = EXCLUDED.ttft_p95_ms,
-                  prompt_tokens_sum = EXCLUDED.prompt_tokens_sum,
-                  completion_tokens_sum = EXCLUDED.completion_tokens_sum,
-                  cost_usd_sum = EXCLUDED.cost_usd_sum
-                """,
-                {"start": start, "end": end},
-            )
-            return cur.rowcount
-
-    def ensure_partitions(self, *, days_ahead: int = 1, retention_days: int = 30) -> None:
-        with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
-            cur.execute("SELECT ensure_inference_logs_partition(CURRENT_DATE)")
-            cur.execute("SELECT ensure_tool_invocations_partition(CURRENT_DATE)")
-            for offset in range(1, days_ahead + 1):
-                cur.execute("SELECT ensure_inference_logs_partition(CURRENT_DATE + %s)", (offset,))
-                cur.execute(
-                    "SELECT ensure_tool_invocations_partition(CURRENT_DATE + %s)", (offset,)
-                )
-            cur.execute(
-                """
-                SELECT inhrelid::regclass::text
-                FROM pg_inherits
-                WHERE inhparent = 'inference_logs'::regclass
-                  AND inhrelid::regclass::text ~ '^inference_logs_[0-9]{8}$'
-                  AND to_date(right(inhrelid::regclass::text, 8), 'YYYYMMDD')
-                      < CURRENT_DATE - %s
-                """,
-                (retention_days,),
-            )
-            for (partition_name,) in cur.fetchall():
-                cur.execute(
-                    sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(partition_name))
-                )
-            cur.execute(
-                """
-                SELECT inhrelid::regclass::text
-                FROM pg_inherits
-                WHERE inhparent = 'tool_invocations'::regclass
-                  AND inhrelid::regclass::text ~ '^tool_invocations_[0-9]{8}$'
-                  AND to_date(right(inhrelid::regclass::text, 8), 'YYYYMMDD')
-                      < CURRENT_DATE - %s
-                """,
-                (retention_days,),
-            )
-            for (partition_name,) in cur.fetchall():
-                cur.execute(
-                    sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(partition_name))
-                )
 
     def _event_to_row(self, event: InferenceEvent) -> dict[str, Any]:
         created_at = event.created_at or datetime.now(UTC)

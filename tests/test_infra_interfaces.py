@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from prism_infra.bus import InMemoryBus
-from prism_infra.models import InferenceEvent, LogsQuery, MetricsQuery, MetricsRow, Usage
+from prism_infra.models import InferenceEvent, LogsQuery, MetricsQuery, Usage
 from prism_infra.storage import InMemoryLogStore, JsonbRawPayloadStore, LocalRawPayloadStore
 
 
@@ -68,20 +68,7 @@ def test_in_memory_log_store_writes_logs_and_metrics() -> None:
         response_preview="hi",
         created_at=now,
     )
-    metric = MetricsRow(
-        minute_bucket=now,
-        model="gpt-4o",
-        provider="openai",
-        count=1,
-        error_count=0,
-        latency_p50_ms=42,
-        latency_p95_ms=42,
-        prompt_tokens_sum=10,
-        completion_tokens_sum=5,
-    )
-
     store.write_logs_batch([event])
-    store.upsert_metrics([metric])
 
     logs = store.get_logs(
         LogsQuery(start=now - timedelta(minutes=1), end=now + timedelta(minutes=1))
@@ -91,7 +78,10 @@ def test_in_memory_log_store_writes_logs_and_metrics() -> None:
     )
 
     assert logs == [event]
-    assert metrics == [metric]
+    assert len(metrics) == 1
+    assert metrics[0].count == 1
+    assert metrics[0].model == "gpt-4o"
+    assert metrics[0].prompt_tokens_sum == 10
 
 
 def test_in_memory_log_store_dedupes_by_inference_id() -> None:

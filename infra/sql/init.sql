@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
 CREATE TYPE message_role AS ENUM ('user', 'assistant', 'system');
 CREATE TYPE message_status AS ENUM ('pending', 'ok', 'error', 'cancelled');
 
@@ -79,9 +81,9 @@ CREATE TABLE inference_logs (
   sdk_version TEXT,
   schema_version TEXT NOT NULL,
   PRIMARY KEY (id, created_at)
-) PARTITION BY RANGE (created_at);
+);
 
-CREATE TABLE inference_logs_default PARTITION OF inference_logs DEFAULT;
+SELECT create_hypertable('inference_logs', by_range('created_at', INTERVAL '1 day'));
 
 CREATE INDEX inference_logs_created_idx ON inference_logs (created_at);
 CREATE INDEX inference_logs_model_created_idx ON inference_logs (model, provider, created_at);
@@ -107,9 +109,9 @@ CREATE TABLE tool_invocations (
   sdk_version TEXT,
   schema_version TEXT NOT NULL,
   PRIMARY KEY (id, created_at)
-) PARTITION BY RANGE (created_at);
+);
 
-CREATE TABLE tool_invocations_default PARTITION OF tool_invocations DEFAULT;
+SELECT create_hypertable('tool_invocations', by_range('created_at', INTERVAL '1 day'));
 
 CREATE INDEX tool_invocations_created_idx ON tool_invocations (created_at);
 CREATE INDEX tool_invocations_tool_created_idx ON tool_invocations (tool_name, created_at);
@@ -118,64 +120,34 @@ CREATE INDEX tool_invocations_inference_created_idx
 CREATE INDEX tool_invocations_errors_idx
   ON tool_invocations (status, created_at) WHERE status <> 'ok';
 
-CREATE TABLE metrics_minute (
-  minute_bucket TIMESTAMPTZ NOT NULL,
-  model TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  count INT NOT NULL,
-  error_count INT NOT NULL,
-  latency_p50_ms INT NOT NULL,
-  latency_p95_ms INT NOT NULL,
-  ttft_p50_ms INT,
-  ttft_p95_ms INT,
-  prompt_tokens_sum BIGINT NOT NULL,
-  completion_tokens_sum BIGINT NOT NULL,
-  cost_usd_sum DOUBLE PRECISION NOT NULL DEFAULT 0,
-  PRIMARY KEY (minute_bucket, model, provider)
-);
+CREATE MATERIALIZED VIEW metrics_minute
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+  time_bucket('1 minute', created_at) AS minute_bucket,
+  model,
+  provider,
+  count(*)::int AS count,
+  count(*) FILTER (WHERE status <> 'ok')::int AS error_count,
+  COALESCE(sum(prompt_tokens), 0)::bigint AS prompt_tokens_sum,
+  COALESCE(sum(completion_tokens), 0)::bigint AS completion_tokens_sum,
+  COALESCE(sum(cost_usd), 0)::double precision AS cost_usd_sum
+FROM inference_logs
+GROUP BY minute_bucket, model, provider
+WITH NO DATA;
 
-CREATE INDEX metrics_minute_bucket_idx ON metrics_minute (minute_bucket DESC);
+SELECT add_continuous_aggregate_policy('metrics_minute',
+  start_offset    => INTERVAL '15 minutes',
+  end_offset      => INTERVAL '1 minute',
+  schedule_interval => INTERVAL '5 minutes');
 
-CREATE OR REPLACE FUNCTION ensure_inference_logs_partition(partition_day DATE)
-RETURNS void
-LANGUAGE plpgsql
-AS $$
-DECLARE
-  partition_name TEXT := format('inference_logs_%s', to_char(partition_day, 'YYYYMMDD'));
-  from_ts TEXT := partition_day::TEXT;
-  to_ts TEXT := (partition_day + 1)::TEXT;
-BEGIN
-  EXECUTE format(
-    'CREATE TABLE IF NOT EXISTS %I PARTITION OF inference_logs FOR VALUES FROM (%L) TO (%L)',
-    partition_name,
-    from_ts,
-    to_ts
-  );
-END;
-$$;
+SELECT add_retention_policy('inference_logs', INTERVAL '30 days');
+SELECT add_retention_policy('tool_invocations', INTERVAL '30 days');
 
-CREATE OR REPLACE FUNCTION ensure_tool_invocations_partition(partition_day DATE)
-RETURNS void
-LANGUAGE plpgsql
-AS $$
-DECLARE
-  partition_name TEXT := format('tool_invocations_%s', to_char(partition_day, 'YYYYMMDD'));
-  from_ts TEXT := partition_day::TEXT;
-  to_ts TEXT := (partition_day + 1)::TEXT;
-BEGIN
-  EXECUTE format(
-    'CREATE TABLE IF NOT EXISTS %I PARTITION OF tool_invocations FOR VALUES FROM (%L) TO (%L)',
-    partition_name,
-    from_ts,
-    to_ts
-  );
-END;
-$$;
-
-SELECT ensure_inference_logs_partition(CURRENT_DATE);
-SELECT ensure_inference_logs_partition(CURRENT_DATE + 1);
-SELECT ensure_tool_invocations_partition(CURRENT_DATE);
-SELECT ensure_tool_invocations_partition(CURRENT_DATE + 1);
+ALTER TABLE inference_logs SET (
+  timescaledb.compress,
+  timescaledb.compress_segmentby = 'model, provider',
+  timescaledb.compress_orderby = 'created_at DESC');
+SELECT add_compression_policy('inference_logs', INTERVAL '7 days');
 
 CREATE TABLE IF NOT EXISTS dashboards (
   id UUID PRIMARY KEY,
